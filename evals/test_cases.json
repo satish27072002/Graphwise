@@ -1,0 +1,162 @@
+[
+  {
+    "id": "tc-001",
+    "question": "How does authentication work?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "hybrid",
+    "expected_node_names": ["login_required", "authenticate_user"],
+    "notes": "Semantic question — should use hybrid search, not text2Cypher"
+  },
+  {
+    "id": "tc-002",
+    "question": "What breaks if I change User.save()?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "hybrid + graph expansion",
+    "expected_node_names": ["User.save", "create_user", "update_profile"],
+    "notes": "Impact analysis — hybrid search + graph expansion via CALLS"
+  },
+  {
+    "id": "tc-003",
+    "question": "How many functions call process_payment()?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "text2cypher",
+    "expected_node_names": [],
+    "notes": "Count question — should route to text2Cypher"
+  },
+  {
+    "id": "tc-004",
+    "question": "What does UserService depend on?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "hybrid + graph expansion",
+    "expected_node_names": ["UserService"],
+    "notes": "Dependency question — graph expansion from UserService node"
+  },
+  {
+    "id": "tc-005",
+    "question": "Show me all database queries in the payment flow",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "hybrid",
+    "expected_node_names": [],
+    "notes": "Semantic search for DB query patterns"
+  },
+  {
+    "id": "tc-006",
+    "question": "How many classes are in this codebase?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "text2cypher",
+    "expected_node_names": [],
+    "notes": "Pure count question — should always route to text2Cypher"
+  },
+  {
+    "id": "tc-007",
+    "question": "Which files import the requests library?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "text2cypher",
+    "expected_node_names": [],
+    "notes": "Structural import query — text2Cypher via IMPORTS relationship"
+  },
+  {
+    "id": "tc-008",
+    "question": "What classes inherit from BaseModel?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "text2cypher",
+    "expected_node_names": [],
+    "notes": "Inheritance query — INHERITS relationship, text2Cypher"
+  },
+  {
+    "id": "tc-009",
+    "question": "How does the password hashing work?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "hybrid",
+    "expected_node_names": [],
+    "notes": "Semantic question about security implementation"
+  },
+  {
+    "id": "tc-010",
+    "question": "What functions have the highest cyclomatic complexity?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "text2cypher",
+    "expected_node_names": [],
+    "notes": "Property-based ranking query — text2Cypher ORDER BY complexity"
+  },
+  {
+    "id": "tc-011",
+    "question": "How does error handling work in the API layer?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "hybrid",
+    "expected_node_names": [],
+    "notes": "Semantic question about error handling patterns"
+  },
+  {
+    "id": "tc-012",
+    "question": "What would break if I delete the validate_input function?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "hybrid + graph expansion",
+    "expected_node_names": ["validate_input"],
+    "notes": "Impact/dependency analysis via graph expansion"
+  },
+  {
+    "id": "tc-013",
+    "question": "List all functions that are longer than 50 lines",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "text2cypher",
+    "expected_node_names": [],
+    "notes": "Property filter query — text2Cypher WHERE loc > 50"
+  },
+  {
+    "id": "tc-014",
+    "question": "How does the caching layer work?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "hybrid",
+    "expected_node_names": [],
+    "notes": "Semantic architectural question"
+  },
+  {
+    "id": "tc-015",
+    "question": "Which functions call the database directly?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "hybrid",
+    "expected_node_names": [],
+    "notes": "Semantic query about data access patterns"
+  },
+  {
+    "id": "tc-016",
+    "question": "How many total lines of code are in the project?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "text2cypher",
+    "expected_node_names": [],
+    "notes": "Aggregate count — text2Cypher SUM(loc)"
+  },
+  {
+    "id": "tc-017",
+    "question": "What is the call chain from main to process_request?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "text2cypher",
+    "expected_node_names": [],
+    "notes": "Path query between two specific functions — text2Cypher shortestPath"
+  },
+  {
+    "id": "tc-018",
+    "question": "Explain how the request validation pipeline works",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "hybrid + graph expansion",
+    "expected_node_names": [],
+    "notes": "Multi-step semantic + graph trace to find pipeline functions"
+  },
+  {
+    "id": "tc-019",
+    "question": "What modules does the auth module import?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "text2cypher",
+    "expected_node_names": [],
+    "notes": "Specific module import graph query — text2Cypher IMPORTS"
+  },
+  {
+    "id": "tc-020",
+    "question": "Which functions have no docstring?",
+    "codebase_id": "flask",
+    "expected_retrieval_method": "text2cypher",
+    "expected_node_names": [],
+    "notes": "Missing property filter — text2Cypher WHERE docstring IS NULL"
+  }
+]
