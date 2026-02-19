@@ -13,24 +13,32 @@ interface ModuleNodeData {
 export function ModuleNode({ data }: NodeProps<ModuleNodeData>) {
   const [hovered, setHovered] = useState(false);
 
+  const isHighlighted = data.highlighted;
+
   return (
     <div
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
-        background: data.highlighted ? "var(--bg-elevated)" : "var(--bg-surface)",
-        border: "1px solid var(--bg-border)",
+        background: isHighlighted
+          ? "linear-gradient(135deg, #160d24 0%, var(--bg-surface) 100%)"
+          : "var(--bg-surface)",
+        border: `1px solid ${hovered ? "rgba(255,255,255,0.12)" : "var(--bg-border)"}`,
         borderLeft: "3px solid var(--accent-module)",
-        borderRadius: 6,
+        borderRadius: 8,
         padding: "10px 14px",
         minWidth: 160,
         maxWidth: 240,
-        opacity: data.highlighted ? 1 : 0.45,
-        boxShadow: data.highlighted
-          ? "0 0 0 1px var(--accent-primary), 0 0 20px var(--highlight-glow)"
-          : "none",
-        transform: hovered ? "scale(1.02)" : "scale(1)",
-        transition: "transform 150ms ease",
+        opacity: isHighlighted ? 1 : 0.75,
+        boxShadow: isHighlighted
+          ? hovered
+            ? "0 0 0 1px rgba(139,92,246,0.6), 0 0 28px rgba(139,92,246,0.22), 0 4px 12px rgba(0,0,0,0.55)"
+            : "0 0 0 1px rgba(139,92,246,0.45), 0 0 20px rgba(139,92,246,0.16), 0 2px 8px rgba(0,0,0,0.5)"
+          : hovered
+            ? "0 4px 12px rgba(0,0,0,0.55), 0 1px 3px rgba(0,0,0,0.35)"
+            : "0 1px 3px rgba(0,0,0,0.45), 0 1px 2px rgba(0,0,0,0.3)",
+        transform: hovered ? "scale(1.02) translateY(-1px)" : "scale(1)",
+        transition: "transform 150ms ease, box-shadow 150ms ease, border-color 150ms ease, opacity 150ms ease",
         cursor: "pointer",
       }}
     >
@@ -38,10 +46,11 @@ export function ModuleNode({ data }: NodeProps<ModuleNodeData>) {
 
       <p
         className="font-mono font-medium truncate"
-        style={{ fontSize: 13, color: "var(--text-primary)" }}
+        style={{ fontSize: 13, color: "var(--text-primary)", letterSpacing: "-0.01em" }}
         title={data.name}
       >
-        ○ {data.name}
+        <span style={{ color: "var(--accent-module)", marginRight: 5 }}>○</span>
+        {data.name}
       </p>
 
       <p

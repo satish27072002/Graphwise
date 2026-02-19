@@ -19,6 +19,7 @@ from services.retrieval.graph_expander import expand_graph
 from services.retrieval.parent_retriever import get_rich_context
 from services.retrieval.text2cypher import is_structural_question, answer_structural_question
 from services.llm.query_engine import assemble_context, assemble_cypher_context, generate_answer
+from db.neo4j_client import run_query as neo4j_run_query
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/query", tags=["query"])
@@ -90,10 +91,37 @@ async def query(request: QueryRequest) -> QueryResponse:
             elapsed_ms = int((time.monotonic() - t_start) * 1000)
             logger.info(f"text2Cypher answered in {elapsed_ms}ms")
 
+            # Build graph from Cypher result node names
+            graph_dict: dict = {"nodes": [], "edges": []}
+            try:
+                # Extract string values from Cypher results (column names vary by query)
+                result_names: list[str] = []
+                for r in (cypher_results or []):
+                    for val in r.values():
+                        if isinstance(val, str) and val:
+                            result_names.append(val)
+
+                if result_names:
+                    records = await neo4j_run_query(
+                        """
+                        MATCH (f:Function)
+                        WHERE f.name IN $names AND f.codebase_id = $codebase_id
+                        RETURN f.id AS id
+                        LIMIT 20
+                        """,
+                        {"names": result_names, "codebase_id": request.codebase_id},
+                    )
+                    seed_ids = [r["id"] for r in records if r.get("id")]
+                    if seed_ids:
+                        graph_dict = await expand_graph(seed_ids, hops=request.hops)
+                        logger.info(f"text2Cypher graph: {len(graph_dict.get('nodes', []))} nodes")
+            except Exception as exc:
+                logger.warning(f"text2Cypher graph build failed: {exc}")
+
             return QueryResponse(
                 answer=answer,
                 sources=[],
-                graph=GraphData(),
+                graph=_build_graph_data(graph_dict),
                 retrieval_method=retrieval_method,
                 cypher_used=cypher_used,
             )

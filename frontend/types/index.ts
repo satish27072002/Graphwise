@@ -64,6 +64,12 @@ export interface IngestRequest {
   language: "python";
 }
 
+export interface GithubIngestRequest {
+  github_url: string;
+  codebase_id: string;
+  language: "python";
+}
+
 export interface IngestResponse {
   status: string;
   nodes_created: number;

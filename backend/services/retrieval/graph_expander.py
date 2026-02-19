@@ -23,42 +23,21 @@ _LABEL_TO_TYPE = {
     "Chunk":    "Function",   # treat chunks as functions for display
 }
 
-# Graph expansion Cypher: traverse up to $hops steps from seed nodes
-_EXPAND_CYPHER = """
+# Graph expansion Cypher: standard variable-length path — no APOC required.
+# Traverses CALLS, IMPORTS, INHERITS, HAS_METHOD up to 2 hops from seed nodes.
+# Uses DISTINCT to deduplicate nodes when multiple paths lead to the same node.
+_EXPAND_CYPHER_STANDARD = """
 MATCH (seed)
 WHERE seed.id IN $seed_ids
-CALL apoc.path.subgraphAll(seed, {
-    relationshipFilter: 'CALLS>|IMPORTS>|INHERITS>|HAS_METHOD>',
-    maxLevel: $hops
-})
-YIELD nodes, relationships
-UNWIND nodes AS n
-WITH n, relationships
+MATCH (seed)-[:CALLS|IMPORTS|INHERITS|HAS_METHOD*1..2]->(neighbor)
+WITH DISTINCT neighbor
 RETURN
-    n.id        AS id,
-    labels(n)[0] AS label,
-    n.name      AS name,
-    coalesce(n.file, n.path, '') AS file,
-    n.start_line AS start_line,
-    n.end_line   AS end_line,
-    relationships
-"""
-
-# Fallback without APOC: variable-length path expansion
-_EXPAND_CYPHER_NO_APOC = """
-MATCH path = (seed)-[r:CALLS|IMPORTS|INHERITS|HAS_METHOD*0..$hops]->(neighbor)
-WHERE seed.id IN $seed_ids
-WITH seed, neighbor, r, relationships(path) AS rels, nodes(path) AS path_nodes
-UNWIND path_nodes AS n
-WITH DISTINCT n, rels
-RETURN
-    n.id         AS id,
-    labels(n)[0] AS label,
-    n.name       AS name,
-    coalesce(n.file, n.path, '') AS file,
-    n.start_line AS start_line,
-    n.end_line   AS end_line,
-    [] AS relationships
+    neighbor.id          AS id,
+    labels(neighbor)[0]  AS label,
+    neighbor.name        AS name,
+    coalesce(neighbor.file, neighbor.path, '') AS file,
+    neighbor.start_line  AS start_line,
+    neighbor.end_line    AS end_line
 """
 
 _EXPAND_EDGES_CYPHER = """
@@ -75,10 +54,11 @@ RETURN
 def _make_node(row: dict, highlighted: bool) -> dict:
     """Convert a Neo4j record into a React Flow node dict."""
     label = row.get("label") or "Function"
+    node_id = row.get("id") or ""
     return {
-        "id": row["id"],
+        "id": node_id,
         "type": _LABEL_TO_TYPE.get(label, "Function"),
-        "name": row.get("name") or row.get("id", ""),
+        "name": row.get("name") or node_id,
         "file": row.get("file") or "",
         "highlighted": highlighted,
     }
@@ -140,22 +120,15 @@ async def expand_graph(
     if hops == 0:
         return {"nodes": list(all_nodes.values()), "edges": []}
 
-    # ── Expand neighbours ──────────────────────────────────────────────
+    # ── Expand neighbours (standard Cypher, no APOC required) ─────────
     try:
         expand_rows = await run_query(
-            _EXPAND_CYPHER,
-            params={"seed_ids": seed_node_ids, "hops": hops},
+            _EXPAND_CYPHER_STANDARD,
+            params={"seed_ids": seed_node_ids},
         )
-    except Exception:
-        # Fallback to non-APOC expansion
-        try:
-            expand_rows = await run_query(
-                _EXPAND_CYPHER_NO_APOC,
-                params={"seed_ids": seed_node_ids, "hops": hops},
-            )
-        except Exception as exc:
-            logger.warning(f"Graph expansion failed: {exc}")
-            expand_rows = []
+    except Exception as exc:
+        logger.warning(f"Graph expansion failed: {exc}")
+        expand_rows = []
 
     for row in expand_rows:
         node_id = row.get("id")

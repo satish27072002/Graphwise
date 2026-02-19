@@ -55,27 +55,36 @@ export function SearchBar({ onSubmit, isLoading, defaultValue, placeholder }: Se
     }
   };
 
+  // Premium focus styles
   const borderColor = isFocused
     ? "var(--accent-primary)"
     : "var(--bg-border)";
 
   const boxShadow = isFocused
-    ? "0 0 0 3px var(--highlight-glow)"
-    : "none";
+    ? "0 0 0 1px var(--accent-primary), 0 0 16px rgba(59,130,246,0.15), 0 1px 3px rgba(0,0,0,0.4)"
+    : "0 1px 3px rgba(0,0,0,0.3)";
+
+  const background = isFocused ? "var(--bg-elevated)" : "var(--bg-surface)";
 
   return (
     <div
-      className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-md border transition-all duration-150 ${isLoading ? "shimmer-border" : ""}`}
+      className={`w-full flex items-center gap-3 rounded-md border ${isLoading ? "shimmer-border" : ""}`}
       style={{
-        background: "var(--bg-surface)",
+        padding: "10px 16px",
+        background,
         borderColor,
         boxShadow,
+        transition: "border-color 150ms ease, box-shadow 150ms ease, background 150ms ease",
       }}
     >
       {/* Left icon */}
       <Search
         size={14}
-        style={{ color: "var(--text-muted)", flexShrink: 0 }}
+        style={{
+          color: isFocused ? "var(--accent-primary)" : "var(--text-muted)",
+          flexShrink: 0,
+          transition: "color 150ms ease",
+        }}
       />
 
       {/* Input */}
@@ -100,9 +109,10 @@ export function SearchBar({ onSubmit, isLoading, defaultValue, placeholder }: Se
         <kbd
           className="text-[10px] font-mono px-1.5 py-0.5 rounded border shrink-0"
           style={{
-            background: "var(--bg-elevated)",
+            background: "var(--bg-base)",
             borderColor: "var(--bg-border)",
             color: "var(--text-muted)",
+            letterSpacing: "0.02em",
           }}
         >
           ⌘K
@@ -110,7 +120,7 @@ export function SearchBar({ onSubmit, isLoading, defaultValue, placeholder }: Se
       ) : (
         <span
           className="text-[10px] font-mono shrink-0 animate-pulse"
-          style={{ color: "var(--text-muted)" }}
+          style={{ color: "var(--accent-primary)" }}
         >
           thinking...
         </span>

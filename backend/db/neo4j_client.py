@@ -85,6 +85,6 @@ async def run_query(cypher: str, params: dict | None = None) -> list[dict]:
     """
     driver = await get_driver()
     async with driver.session() as session:
-        result = await session.run(cypher, **(params or {}))
+        result = await session.run(cypher, parameters=(params or {}))
         records = await result.data()
     return records

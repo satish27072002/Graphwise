@@ -69,7 +69,13 @@ class QueryResponse(BaseModel):
 # ─────────────────────────────────────────────
 
 class IngestRequest(BaseModel):
-    repo_path: str = Field(..., description="Local folder path or GitHub repo URL")
+    repo_path: str = Field(..., description="Local folder path")
+    codebase_id: str = Field(..., description="Unique identifier for this codebase")
+    language: Literal["python"] = "python"
+
+
+class GithubIngestRequest(BaseModel):
+    github_url: str = Field(..., description="Public GitHub repo URL (https://github.com/...)")
     codebase_id: str = Field(..., description="Unique identifier for this codebase")
     language: Literal["python"] = "python"
 

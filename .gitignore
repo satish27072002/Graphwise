@@ -60,3 +60,4 @@ Thumbs.db
 # Misc
 *.tmp
 *.bak
+*.tsbuildinfo

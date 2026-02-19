@@ -103,7 +103,7 @@ async def generate_cypher(question: str, codebase_id: str) -> str:
 
     client = get_client()
     response = await client.chat.completions.create(
-        model=settings.llm_model,
+        model=settings.llm_model_fast,  # gpt-4o-mini: cheaper, well within TPM limits
         messages=[
             {"role": "system", "content": system},
             {"role": "user",   "content": user},

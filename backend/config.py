@@ -20,8 +20,10 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
 
-    # LLM model
+    # LLM model — for answer generation
     llm_model: str = "gpt-4o"
+    # Fast/cheap model for text2Cypher generation (avoids hitting TPM limits on gpt-4o)
+    llm_model_fast: str = "gpt-4o-mini"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
