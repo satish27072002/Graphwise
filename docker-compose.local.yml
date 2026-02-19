@@ -48,14 +48,13 @@ services:
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev    # lightweight dev image: npm install + npm run dev
     container_name: codegraph-frontend
     ports:
       - "3000:3000"
     volumes:
-      - ./frontend:/app         # hot reload
-      - /app/node_modules       # preserve container's node_modules
-      - /app/.next              # preserve Next.js build cache
+      - ./frontend:/app              # hot reload — source files
+      - /app/node_modules            # anonymous volume: keeps container node_modules isolated from host
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8000
     depends_on:
