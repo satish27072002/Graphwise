@@ -12,8 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare env file
+        run: cp .env.example .env
       - name: Validate Docker Compose
-        run: docker compose -f infra/docker-compose.yml config >/dev/null
+        run: docker compose --env-file .env -f infra/docker-compose.yml config >/dev/null
 
   api-gateway-tests:
     name: API Gateway Tests

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import shutil
 import sys
 import zipfile
 from pathlib import Path
@@ -17,6 +18,8 @@ if str(ROOT_DIR) not in sys.path:
 
 os.environ.setdefault("DATABASE_URL", f"sqlite+aiosqlite:///{TEST_DB_PATH}")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:3000")
+TEST_DATA_DIR = ROOT_DIR / ".test_data"
+os.environ.setdefault("DATA_DIR", str(TEST_DATA_DIR))
 
 from app.db import engine  # noqa: E402
 from app.main import app  # noqa: E402
@@ -24,6 +27,9 @@ from app.models import Base  # noqa: E402
 
 
 def _reset_tables() -> None:
+    if TEST_DATA_DIR.exists():
+        shutil.rmtree(TEST_DATA_DIR)
+
     async def _run() -> None:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
