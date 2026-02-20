@@ -33,7 +33,7 @@ services:
     volumes:
       - neo4j_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u neo4j -p password 'RETURN 1;' >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "cypher-shell -a bolt://neo4j:7687 -u neo4j -p password 'RETURN 1;' >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 10s
       retries: 20
@@ -42,16 +42,31 @@ services:
   api_gateway:
     build:
       context: ../services/api_gateway
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    env_file:
+      - ../.env
     environment:
       POSTGRES_URL: postgresql://jobs:jobs@postgres:5432/jobs
       REDIS_URL: redis://redis:6379/0
       NEO4J_URL: bolt://neo4j:7687
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:3001}
+      RETRIEVAL_SERVICE_URL: http://retrieval_service:8003
+      LLM_SERVICE_URL: http://llm_service:8004
+      GRAPH_SERVICE_URL: http://graph_service:8002
+      SERVICE_TIMEOUT_SEC: ${SERVICE_TIMEOUT_SEC:-30}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
       neo4j:
+        condition: service_healthy
+      retrieval_service:
+        condition: service_started
+      llm_service:
         condition: service_started
     ports:
       - "8000:8000"
@@ -64,31 +79,50 @@ services:
       retries: 20
       start_period: 5s
 
-  ingest_service:
+  frontend:
     build:
-      context: ../services/ingest_service
+      context: ../frontend
+      dockerfile: Dockerfile
+    environment:
+      VITE_API_BASE: ${VITE_API_BASE:-}
     depends_on:
-      postgres:
+      api_gateway:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-      neo4j:
-        condition: service_started
-    volumes:
-      - ../data:/data
+    ports:
+      - "3000:3000"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health').read()"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/"]
       interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 5s
+      start_period: 15s
 
   graph_service:
     build:
       context: ../services/graph_service
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8002
+    env_file:
+      - ../.env
+    environment:
+      NEO4J_URL: bolt://neo4j:7687
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ENABLE_EMBEDDINGS: ${ENABLE_EMBEDDINGS:-true}
+      DEBUG_ENV: ${DEBUG_ENV:-false}
+      OPENAI_EMBED_MODEL: ${OPENAI_EMBED_MODEL:-text-embedding-3-small}
+      OPENAI_TIMEOUT_SEC: ${OPENAI_TIMEOUT_SEC:-30}
+      OPENAI_EMBED_TIMEOUT_SEC: ${OPENAI_EMBED_TIMEOUT_SEC:-30}
+      OPENAI_EMBED_MAX_RETRIES: ${OPENAI_EMBED_MAX_RETRIES:-8}
+      OPENAI_EMBED_BACKOFF_BASE_SEC: ${OPENAI_EMBED_BACKOFF_BASE_SEC:-0.5}
+      OPENAI_EMBED_BACKOFF_MAX_SEC: ${OPENAI_EMBED_BACKOFF_MAX_SEC:-10}
+      OPENAI_EMBEDDING_DIMENSIONS: ${OPENAI_EMBEDDING_DIMENSIONS:-}
     depends_on:
       neo4j:
-        condition: service_started
+        condition: service_healthy
+    volumes:
+      - ../data:/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health').read()"]
       interval: 10s
@@ -99,6 +133,22 @@ services:
   retrieval_service:
     build:
       context: ../services/retrieval_service
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8003
+    env_file:
+      - ../.env
+    environment:
+      GRAPH_SERVICE_URL: http://graph_service:8002
+      NEO4J_URL: bolt://neo4j:7687
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ENABLE_EMBEDDINGS: ${ENABLE_EMBEDDINGS:-true}
+      DEBUG_ENV: ${DEBUG_ENV:-false}
+      OPENAI_EMBED_MODEL: ${OPENAI_EMBED_MODEL:-text-embedding-3-small}
+      OPENAI_TIMEOUT_SEC: ${OPENAI_TIMEOUT_SEC:-30}
+      OPENAI_EMBEDDING_DIMENSIONS: ${OPENAI_EMBEDDING_DIMENSIONS:-}
+      TOP_K: ${TOP_K:-10}
     depends_on:
       graph_service:
         condition: service_started
@@ -114,6 +164,17 @@ services:
   llm_service:
     build:
       context: ../services/llm_service
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8004
+    env_file:
+      - ../.env
+    environment:
+      NEO4J_URL: bolt://neo4j:7687
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_CHAT_MODEL: ${OPENAI_CHAT_MODEL:-gpt-4o-mini}
+      OPENAI_TIMEOUT_SEC: ${OPENAI_TIMEOUT_SEC:-30}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/health').read()"]
       interval: 10s
@@ -125,9 +186,23 @@ services:
     build:
       context: ../services/workers
     command: celery -A celery_app worker -Q pipeline --loglevel=INFO
+    env_file:
+      - ../.env
     environment:
       POSTGRES_URL: postgresql://jobs:jobs@postgres:5432/jobs
       REDIS_URL: redis://redis:6379/0
+      GRAPH_SERVICE_URL: http://graph_service:8002
+      NEO4J_URL: bolt://neo4j:7687
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ENABLE_EMBEDDINGS: ${ENABLE_EMBEDDINGS:-true}
+      # Long-running /graph/embed calls can take many minutes on large repos.
+      PIPELINE_EMBED_TIMEOUT_SEC: ${PIPELINE_EMBED_TIMEOUT_SEC:-1800}
+      PIPELINE_EMBED_MAX_RETRIES: ${PIPELINE_EMBED_MAX_RETRIES:-2}
+      PIPELINE_EMBED_BACKOFF_BASE_SEC: ${PIPELINE_EMBED_BACKOFF_BASE_SEC:-1}
+      PIPELINE_EMBED_BACKOFF_MAX_SEC: ${PIPELINE_EMBED_BACKOFF_MAX_SEC:-30}
     depends_on:
       postgres:
         condition: service_healthy

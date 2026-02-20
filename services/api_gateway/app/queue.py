@@ -11,7 +11,9 @@ settings = get_settings()
 celery_client = Celery("api_gateway", broker=settings.redis_url)
 
 
-def enqueue_pipeline_job(job_id: uuid.UUID) -> None:
+def enqueue_pipeline_job(
+    job_id: uuid.UUID,
+) -> None:
     celery_client.send_task(
         "pipeline.run_job",
         args=[str(job_id)],

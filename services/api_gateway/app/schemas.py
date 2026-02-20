@@ -1,14 +1,10 @@
 from __future__ import annotations
 
+from typing import Any
 import uuid
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
-
-
-class IngestGithubRequest(BaseModel):
-    repo_url: str
-    branch: str | None = None
 
 
 class JobCreatedResponse(BaseModel):
@@ -29,3 +25,23 @@ class JobStatusResponse(BaseModel):
     error: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class QueryRequest(BaseModel):
+    repo_id: uuid.UUID
+    question: str
+
+
+class QueryResponse(BaseModel):
+    answer: str
+    citations: list[str]
+    warning: str | None = None
+    retrieval_pack: dict[str, Any]
+
+
+class RepoStatusResponse(BaseModel):
+    repo_id: uuid.UUID
+    indexed_node_count: int
+    indexed_edge_count: int
+    embedded_nodes: int
+    embeddings_exist: bool

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import sys
+import zipfile
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -30,13 +32,20 @@ def _reset_tables() -> None:
     asyncio.run(_run())
 
 
-def test_create_github_job_and_fetch_status() -> None:
+def _zip_payload() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("main.py", "print('ok')\n")
+    return buffer.getvalue()
+
+
+def test_create_zip_job_and_fetch_status() -> None:
     _reset_tables()
 
     with TestClient(app) as client:
         create_response = client.post(
-            "/ingest/github",
-            json={"repo_url": "https://github.com/acme/repo", "branch": "main"},
+            "/ingest/zip",
+            files={"file": ("repo.zip", _zip_payload(), "application/zip")},
         )
         assert create_response.status_code == 200
         payload = create_response.json()
@@ -50,7 +59,7 @@ def test_create_github_job_and_fetch_status() -> None:
 
         assert status_payload["job_id"] == job_id
         assert status_payload["repo_id"] == repo_id
-        assert status_payload["job_type"] == "PIPELINE_INGEST_GITHUB"
+        assert status_payload["job_type"] == "PIPELINE_INGEST_ZIP"
         assert status_payload["status"] == "queued"
         assert status_payload["progress"] == 0
         assert status_payload["current_step"] == "INGEST"
@@ -63,8 +72,8 @@ def test_list_jobs_for_repo() -> None:
 
     with TestClient(app) as client:
         create_response = client.post(
-            "/ingest/github",
-            json={"repo_url": "https://github.com/acme/repo", "branch": "main"},
+            "/ingest/zip",
+            files={"file": ("repo.zip", _zip_payload(), "application/zip")},
         )
         assert create_response.status_code == 200
         payload = create_response.json()

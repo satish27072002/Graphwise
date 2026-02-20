@@ -2,17 +2,8 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Copy package files first so npm install is cached when only source changes
 COPY package.json package-lock.json* ./
-
-# Install all deps inside the container (goes into /app/node_modules,
-# which is shadowed by the anonymous volume in docker-compose.local.yml
-# so the host never sees or overwrites it)
 RUN npm install
 
-# Source code is volume-mounted at runtime — no COPY needed here
-
 EXPOSE 3000
-ENV PORT=3000
-
-CMD ["npm", "run", "dev"]
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "3000"]

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
 import time
 import uuid
 from pathlib import Path
+from urllib import error as urlerror
+from urllib import parse as urlparse
+from urllib import request as urlrequest
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,7 +21,13 @@ from .db import engine, get_db_session
 from .logging_config import configure_logging, request_id_context
 from .models import Base, Job
 from .queue import enqueue_pipeline_job
-from .schemas import IngestGithubRequest, JobCreatedResponse, JobStatusResponse
+from .schemas import (
+    JobCreatedResponse,
+    JobStatusResponse,
+    QueryRequest,
+    QueryResponse,
+    RepoStatusResponse,
+)
 
 
 configure_logging()
@@ -86,6 +96,64 @@ async def health() -> dict[str, bool]:
     return {"ok": True}
 
 
+def _clean_upstream_detail(raw: str) -> str:
+    text = raw.strip()
+    if not text:
+        return "no upstream detail"
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return text[:500]
+
+    if isinstance(parsed, dict):
+        if "detail" in parsed:
+            return str(parsed["detail"])[:500]
+        if "message" in parsed:
+            return str(parsed["message"])[:500]
+    return text[:500]
+
+
+def _post_json(url: str, payload: dict) -> dict:
+    req = urlrequest.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlrequest.urlopen(req, timeout=settings.service_timeout_sec) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urlerror.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        upstream_status = int(exc.code)
+        clean = _clean_upstream_detail(detail)
+        raise HTTPException(
+            status_code=upstream_status,
+            detail=f"upstream POST {url} failed ({upstream_status}): {clean}",
+        ) from exc
+    except urlerror.URLError as exc:
+        raise HTTPException(status_code=502, detail=f"upstream POST {url} unavailable: {exc.reason}") from exc
+
+
+def _get_json(url: str, params: dict[str, str]) -> dict:
+    query = urlparse.urlencode(params)
+    full_url = f"{url}?{query}" if query else url
+    req = urlrequest.Request(full_url, method="GET")
+    try:
+        with urlrequest.urlopen(req, timeout=settings.service_timeout_sec) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urlerror.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        upstream_status = int(exc.code)
+        clean = _clean_upstream_detail(detail)
+        raise HTTPException(
+            status_code=upstream_status,
+            detail=f"upstream GET {full_url} failed ({upstream_status}): {clean}",
+        ) from exc
+    except urlerror.URLError as exc:
+        raise HTTPException(status_code=502, detail=f"upstream GET {full_url} unavailable: {exc.reason}") from exc
+
+
 async def _create_pipeline_job(
     session: AsyncSession,
     *,
@@ -107,40 +175,6 @@ async def _create_pipeline_job(
     return job
 
 
-@app.post("/ingest/github", response_model=JobCreatedResponse)
-async def ingest_github(
-    payload: IngestGithubRequest,
-    session: AsyncSession = Depends(get_db_session),
-) -> JobCreatedResponse:
-    repo_id = uuid.uuid4()
-    job = await _create_pipeline_job(
-        session,
-        repo_id=repo_id,
-        job_type="PIPELINE_INGEST_GITHUB",
-    )
-
-    logger.info(
-        "job.created",
-        extra={
-            "job_id": str(job.job_id),
-            "repo_id": str(repo_id),
-            "job_type": job.job_type,
-            "source": "github",
-            "repo_url": payload.repo_url,
-            "branch": payload.branch,
-        },
-    )
-    try:
-        enqueue_pipeline_job(job.job_id)
-    except Exception:
-        logger.exception(
-            "job.enqueue_failed",
-            extra={"job_id": str(job.job_id), "repo_id": str(repo_id)},
-        )
-
-    return JobCreatedResponse(job_id=job.job_id, repo_id=repo_id)
-
-
 @app.post("/ingest/zip", response_model=JobCreatedResponse)
 async def ingest_zip(
     file: UploadFile = File(...),
@@ -155,8 +189,7 @@ async def ingest_zip(
 
     uploads_dir = Path(settings.data_dir) / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
-    filename = Path(file.filename or "upload.zip").name
-    target_path = uploads_dir / f"{job.job_id}_{filename}"
+    target_path = uploads_dir / f"{repo_id}.zip"
     with target_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     await file.close()
@@ -168,7 +201,6 @@ async def ingest_zip(
             "repo_id": str(repo_id),
             "job_type": job.job_type,
             "source": "zip",
-            "uploaded_file": filename,
             "saved_to": os.fspath(target_path),
         },
     )
@@ -202,3 +234,43 @@ async def list_jobs(
     stmt = select(Job).where(Job.repo_id == repo_id).order_by(desc(Job.created_at))
     rows = (await session.scalars(stmt)).all()
     return [JobStatusResponse.model_validate(row) for row in rows]
+
+
+@app.post("/query", response_model=QueryResponse)
+def query_repo(payload: QueryRequest) -> QueryResponse:
+    retrieval_url = f"{settings.retrieval_service_url.rstrip('/')}/retrieve"
+    llm_url = f"{settings.llm_service_url.rstrip('/')}/answer"
+
+    retrieval_pack = _post_json(
+        retrieval_url,
+        {
+            "repo_id": str(payload.repo_id),
+            "question": payload.question,
+        },
+    )
+    llm_response = _post_json(
+        llm_url,
+        {
+            "repo_id": str(payload.repo_id),
+            "question": payload.question,
+            "retrieval_pack": retrieval_pack,
+        },
+    )
+
+    citations_raw = llm_response.get("citations", [])
+    citations = [str(item) for item in citations_raw] if isinstance(citations_raw, list) else []
+    warning = llm_response.get("warning")
+
+    return QueryResponse(
+        answer=str(llm_response.get("answer", "")),
+        citations=citations,
+        warning=str(warning) if warning is not None else None,
+        retrieval_pack=retrieval_pack,
+    )
+
+
+@app.get("/repos/{repo_id}/status", response_model=RepoStatusResponse)
+def repo_status(repo_id: uuid.UUID) -> RepoStatusResponse:
+    graph_url = f"{settings.graph_service_url.rstrip('/')}/graph/repo/status"
+    payload = _get_json(graph_url, {"repo_id": str(repo_id)})
+    return RepoStatusResponse.model_validate(payload)

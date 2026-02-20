@@ -1,0 +1,61 @@
+name: Deploy Azure VM
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "infra/docker-compose.yml"
+      - "frontend/**"
+      - "services/**"
+      - ".github/workflows/deploy-azure-vm.yml"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AZURE_APP_DIR: /opt/codegraph-navigator
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.AZURE_VM_SSH_KEY }}
+
+      - name: Sync repository to VM
+        env:
+          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+          VM_USER: ${{ secrets.AZURE_VM_USER }}
+        run: |
+          rsync -az --delete \
+            --exclude '.git' \
+            --exclude 'frontend/node_modules' \
+            --exclude 'frontend/.next' \
+            --exclude 'frontend/dist' \
+            --exclude 'data' \
+            -e "ssh -o StrictHostKeyChecking=no" \
+            ./ "${VM_USER}@${VM_HOST}:${AZURE_APP_DIR}"
+
+      - name: Write .env on VM
+        if: ${{ secrets.AZURE_APP_ENV != '' }}
+        env:
+          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+          VM_USER: ${{ secrets.AZURE_VM_USER }}
+          APP_ENV_FILE: ${{ secrets.AZURE_APP_ENV }}
+        run: |
+          ssh -o StrictHostKeyChecking=no "${VM_USER}@${VM_HOST}" \
+            "cat > ${AZURE_APP_DIR}/.env <<'ENVEOF'\n${APP_ENV_FILE}\nENVEOF"
+
+      - name: Deploy containers
+        env:
+          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+          VM_USER: ${{ secrets.AZURE_VM_USER }}
+        run: |
+          ssh -o StrictHostKeyChecking=no "${VM_USER}@${VM_HOST}" <<'EOFSSH'
+            set -euo pipefail
+            cd /opt/codegraph-navigator
+            docker compose --env-file .env -f infra/docker-compose.yml pull || true
+            docker compose --env-file .env -f infra/docker-compose.yml up -d --build --remove-orphans
+            docker compose --env-file .env -f infra/docker-compose.yml ps
+          EOFSSH
