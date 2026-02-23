@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import { useMemo, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { motion } from "framer-motion";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -88,8 +88,8 @@ function Shell({ children }: { children: ReactNode }) {
 // ──────────────────────────────────────────────────────────
 // Build QuestionGraph from unified query result
 // ──────────────────────────────────────────────────────────
-const QG_MAX_NODES = 60;
-const QG_MAX_EDGES = 80;
+const QG_MAX_NODES = 40;
+const QG_MAX_EDGES = 50;
 
 function _qgNodeId(type: QuestionGraphNodeType, key: string): string {
   return `${type}:${key}`;
@@ -171,7 +171,28 @@ function buildQuestionGraph(question: string, result: UnifiedQueryResult): Quest
     });
   }
 
-  return { nodes: Array.from(nodeMap.values()), edges };
+  // BFS depth from question root — feeds forceRadial ring layout in GraphVisualization
+  const depthMap = new Map<string, number>();
+  depthMap.set(questionId, 0);
+  const bfsQueue: string[] = [questionId];
+  while (bfsQueue.length > 0) {
+    const current = bfsQueue.shift()!;
+    const currentDepth = depthMap.get(current) ?? 0;
+    for (const edge of edges) {
+      const neighbor =
+        edge.source === current ? edge.target :
+        edge.target === current ? edge.source : null;
+      if (neighbor && !depthMap.has(neighbor)) {
+        depthMap.set(neighbor, currentDepth + 1);
+        bfsQueue.push(neighbor);
+      }
+    }
+  }
+  const nodesWithDepth = Array.from(nodeMap.values()).map((n) => ({
+    ...n,
+    meta: { ...(n.meta ?? {}), depth: depthMap.get(n.id) ?? 3 },
+  }));
+  return { nodes: nodesWithDepth, edges };
 }
 
 // ──────────────────────────────────────────────────────────
@@ -473,39 +494,6 @@ function GraphWorkspace({
   const questionGraph = useMemo(() => buildQuestionGraph(question, result), [question, result]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
-  const [focusSelection, setFocusSelection] = useState(false);
-
-  const questionNodeId = useMemo(
-    () => questionGraph.nodes.find((n) => n.type === "question")?.id ?? null,
-    [questionGraph.nodes],
-  );
-
-  const visibleGraph = useMemo(() => {
-    if (!focusSelection) return questionGraph;
-    const seedIds = new Set<string>();
-    if (selectedNodeId) seedIds.add(selectedNodeId);
-    if (selectedEdgeId) {
-      const sel = questionGraph.edges.find((e) => e.id === selectedEdgeId);
-      if (sel) { seedIds.add(sel.source); seedIds.add(sel.target); }
-    }
-    if (!seedIds.size) return questionGraph;
-
-    const neighborIds = new Set(seedIds);
-    for (const edge of questionGraph.edges) {
-      if (seedIds.has(edge.source) || seedIds.has(edge.target)) {
-        neighborIds.add(edge.source);
-        neighborIds.add(edge.target);
-      }
-    }
-    return {
-      nodes: questionGraph.nodes.filter((n) => neighborIds.has(n.id)),
-      edges: questionGraph.edges.filter((e) => neighborIds.has(e.source) && neighborIds.has(e.target)),
-    };
-  }, [focusSelection, questionGraph, selectedEdgeId, selectedNodeId]);
-
-  useEffect(() => {
-    setFocusSelection(false);
-  }, [questionGraph.nodes, questionGraph.edges]);
 
   const selectedNode = useMemo(
     () => questionGraph.nodes.find((n) => n.id === selectedNodeId) ?? null,
@@ -533,34 +521,9 @@ function GraphWorkspace({
             <h4>Graph View (Interactive)</h4>
           </div>
 
-          <div className="qg-toolbar">
-            <div className="qg-actions">
-              <Button
-                type="button"
-                variant="outline"
-                className="chip"
-                disabled={!selectedNodeId && !selectedEdgeId}
-                onClick={() => setFocusSelection(true)}
-              >
-                Focus selection
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                className="chip"
-                onClick={() => {
-                  setFocusSelection(false);
-                  if (questionNodeId) setSelectedNodeId(questionNodeId);
-                }}
-              >
-                Reset to question
-              </Button>
-            </div>
-          </div>
-
           <div className="rounded-xl overflow-hidden border border-white/10 bg-black/40 shadow-inner" style={{ height: "650px" }}>
             <InteractiveQuestionGraph
-              graph={visibleGraph}
+              graph={questionGraph}
               selectedNodeId={selectedNodeId}
               selectedEdgeId={selectedEdgeId}
               onSelectNode={(nodeId) => {
@@ -573,7 +536,6 @@ function GraphWorkspace({
               }}
             />
           </div>
-          {focusSelection && <p className="muted small">Showing selection and 1-hop neighbors.</p>}
         </section>
       </div>
 

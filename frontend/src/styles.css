@@ -1101,3 +1101,21 @@ td {
     height: 360px;
   }
 }
+
+/* ── Neo4j NDL GraphVisualization dark theme overrides ── */
+.neo4j-graph-container {
+  background: #0f172a !important;
+}
+
+/* NDL dark theme — canvas background */
+.ndl-theme-dark .ndl-graph-visualization {
+  background: #0f172a !important;
+}
+
+/* Ensure the graph canvas fills its container */
+.neo4j-graph-container canvas {
+  cursor: default;
+}
+.neo4j-graph-container canvas:active {
+  cursor: grabbing;
+}

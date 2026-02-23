@@ -9,6 +9,10 @@
     "preview": "vite preview --host 0.0.0.0 --port 3000"
   },
   "dependencies": {
+    "@neo4j-ndl/react-graph": "^1.2.21",
+    "@neo4j-nvl/base": "^1.1.0",
+    "@neo4j-nvl/interaction-handlers": "^1.1.0",
+    "@neo4j-nvl/react": "^1.1.0",
     "@radix-ui/react-label": "^2.1.8",
     "@radix-ui/react-slot": "^1.2.4",
     "@tanstack/react-query": "^5.90.21",
@@ -17,8 +21,8 @@
     "d3-force": "^3.0.0",
     "framer-motion": "^12.23.24",
     "lucide-react": "^0.575.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
     "react-force-graph-2d": "^1.29.1",
     "react-router-dom": "^7.9.4",
     "reactflow": "^11.11.4",
@@ -28,8 +32,8 @@
   "devDependencies": {
     "@types/d3-force": "^3.0.10",
     "@types/node": "^24.3.0",
-    "@types/react": "^18.3.11",
-    "@types/react-dom": "^18.3.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^4.7.0",
     "autoprefixer": "^10.4.24",
     "postcss": "^8.5.6",
