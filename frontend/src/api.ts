@@ -1,4 +1,6 @@
-export type JobStatus = "queued" | "running" | "completed" | "failed";
+import { JobStatus } from "./types";
+
+export type { JobStatus };
 
 export interface Job {
   job_id: string;
@@ -13,94 +15,28 @@ export interface Job {
   updated_at: string;
 }
 
-export type RetrievalNodeType = "file" | "class" | "function" | "module" | string;
-
-export interface RetrievalNode {
+export interface GraphNode {
   id: string;
-  repo_id?: string;
-  type: RetrievalNodeType;
-  name: string;
-  path: string;
-  code_snippet: string;
+  type: string;
+  label: string;
+  path?: string | null;
 }
 
-export interface RetrievalEdge {
+export interface GraphEdge {
+  id: string;
   source: string;
   target: string;
-  type: "contains" | "imports" | "calls" | string;
+  label: string;
 }
 
-export interface RetrievalSnippet {
-  id: string;
-  path: string;
-  name: string;
-  type: RetrievalNodeType;
-  code_snippet: string;
-  score?: number;
-  semantic_score?: number | null;
-  keyword_score?: number | null;
-}
-
-export interface QueryResult {
+export interface UnifiedQueryResult {
   answer: string;
   citations: string[];
+  graph: {
+    nodes: GraphNode[];
+    edges: GraphEdge[];
+  };
   warning?: string | null;
-  retrieval_pack?: {
-    snippets?: RetrievalSnippet[];
-    nodes?: RetrievalNode[];
-    edges?: RetrievalEdge[];
-    scores?: Record<string, { semantic?: number | null; keyword?: number | null; combined?: number | null }>;
-  };
-}
-
-export interface KgLinkedEntity {
-  name: string;
-  type: string;
-  score: number;
-}
-
-export interface KgSubgraphNode {
-  id: string;
-  kind?: string;
-  name?: string;
-  type?: string;
-  repo_id?: string;
-  path?: string;
-  text?: string;
-  [key: string]: unknown;
-}
-
-export interface KgSubgraphEdge {
-  source: string;
-  target: string;
-  type?: string;
-  relation_type?: string;
-  confidence?: number;
-  evidence_chunk_id?: string;
-  [key: string]: unknown;
-}
-
-export interface KgEvidence {
-  chunk_id: string;
-  doc_path: string;
-  text: string;
-  score: number;
-}
-
-export interface KgRetrievalTrace {
-  step: string;
-  detail: string;
-}
-
-export interface KgQueryResult {
-  linked_entities: KgLinkedEntity[];
-  subgraph: {
-    nodes: KgSubgraphNode[];
-    edges: KgSubgraphEdge[];
-  };
-  evidence: KgEvidence[];
-  retrieval_trace: KgRetrievalTrace[];
-  answer?: string;
 }
 
 function resolveApiBase(): string {
@@ -177,20 +113,8 @@ export function repoStatus(repoId: string) {
 }
 
 export function queryRepo(repoId: string, question: string) {
-  return request<QueryResult>("/query", {
+  return request<UnifiedQueryResult>("/query", {
     method: "POST",
     body: JSON.stringify({ repo_id: repoId, question }),
-  });
-}
-
-export function queryKg(repoId: string, question: string) {
-  return request<KgQueryResult>("/kg/query", {
-    method: "POST",
-    body: JSON.stringify({
-      repo_id: repoId,
-      question,
-      top_k_chunks: 10,
-      hops: 2,
-    }),
   });
 }

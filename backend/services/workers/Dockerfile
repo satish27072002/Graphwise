@@ -11,10 +11,13 @@ RUN groupadd --system appuser \
     && mkdir -p /data \
     && chown -R appuser:appuser /app /data
 
-COPY requirements.txt ./
+COPY shared /shared
+RUN pip install --no-cache-dir -e /shared
+
+COPY services/workers/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY services/workers/ .
 RUN chown -R appuser:appuser /app
 
 USER appuser

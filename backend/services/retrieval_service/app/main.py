@@ -1,22 +1,17 @@
 from __future__ import annotations
 
 import contextlib
-import json
 import logging
 import os
-import random
-import socket
-import time
-import uuid
 from typing import Any
-from urllib import error as urlerror
-from urllib import parse as urlparse
-from urllib import request as urlrequest
 
 from fastapi import FastAPI, HTTPException, Response
 from neo4j import Driver, GraphDatabase
 from neo4j.exceptions import Neo4jError
 from pydantic import BaseModel, Field
+
+from codegraph_shared.http_utils import get_json as _shared_get_json, post_json as _shared_post_json
+from codegraph_shared.openai_utils import embed as _shared_embed
 
 
 GRAPH_SERVICE_URL = os.getenv("GRAPH_SERVICE_URL", "http://graph_service:8002")
@@ -38,7 +33,6 @@ OPENAI_EMBED_MAX_RETRIES = max(1, int(os.getenv("OPENAI_EMBED_MAX_RETRIES", "8")
 OPENAI_EMBED_BACKOFF_BASE_SEC = float(os.getenv("OPENAI_EMBED_BACKOFF_BASE_SEC", "0.5"))
 OPENAI_EMBED_BACKOFF_MAX_SEC = float(os.getenv("OPENAI_EMBED_BACKOFF_MAX_SEC", "10"))
 OPENAI_EMBEDDING_DIMENSIONS = os.getenv("OPENAI_EMBEDDING_DIMENSIONS")
-OPENAI_EMBED_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 app = FastAPI(title="retrieval_service")
 logger = logging.getLogger("retrieval_service")
@@ -47,7 +41,7 @@ neo4j_driver: Driver | None = None
 
 
 class RetrieveRequest(BaseModel):
-    repo_id: uuid.UUID
+    repo_id: str = Field(min_length=1)
     question: str = Field(min_length=1)
     top_k: int | None = Field(default=None, ge=1, le=100)
 
@@ -100,7 +94,6 @@ class KGQueryResponse(BaseModel):
     subgraph: dict[str, list[dict[str, Any]]]
     evidence: list[KGEvidence]
     retrieval_trace: list[RetrievalTrace]
-    answer: str = ""
 
 
 def _validate_embedding_startup_config() -> str | None:
@@ -164,35 +157,13 @@ def _neo4j_session():
 
 
 def _graph_post(path: str, payload: dict) -> dict:
-    endpoint = f"{GRAPH_SERVICE_URL.rstrip('/')}{path}"
-    req = urlrequest.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urlrequest.urlopen(req, timeout=OPENAI_TIMEOUT_SEC) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urlerror.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore")
-        raise HTTPException(status_code=502, detail=f"graph_service {path} failed ({exc.code}): {detail}") from exc
-    except urlerror.URLError as exc:
-        raise HTTPException(status_code=502, detail=f"graph_service unavailable: {exc.reason}") from exc
+    url = f"{GRAPH_SERVICE_URL.rstrip('/')}{path}"
+    return _shared_post_json(url, payload, float(OPENAI_TIMEOUT_SEC))
 
 
 def _graph_get(path: str, params: dict[str, str]) -> dict:
-    query = urlparse.urlencode(params)
-    endpoint = f"{GRAPH_SERVICE_URL.rstrip('/')}{path}?{query}"
-    req = urlrequest.Request(endpoint, method="GET")
-    try:
-        with urlrequest.urlopen(req, timeout=OPENAI_TIMEOUT_SEC) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urlerror.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore")
-        raise HTTPException(status_code=502, detail=f"graph_service {path} failed ({exc.code}): {detail}") from exc
-    except urlerror.URLError as exc:
-        raise HTTPException(status_code=502, detail=f"graph_service unavailable: {exc.reason}") from exc
+    url = f"{GRAPH_SERVICE_URL.rstrip('/')}{path}"
+    return _shared_get_json(url, params, float(OPENAI_TIMEOUT_SEC))
 
 
 def _openai_embed(question: str) -> list[float]:
@@ -202,156 +173,18 @@ def _openai_embed(question: str) -> list[float]:
             status_code=400,
             detail="OPENAI_API_KEY is required for semantic retrieval when embeddings exist.",
         )
-
-    payload: dict[str, object] = {
-        "model": OPENAI_EMBED_MODEL,
-        "input": [question],
-    }
-    if OPENAI_EMBEDDING_DIMENSIONS and OPENAI_EMBED_MODEL.startswith("text-embedding-3"):
-        payload["dimensions"] = int(OPENAI_EMBEDDING_DIMENSIONS)
-
-    payload_bytes = json.dumps(payload).encode("utf-8")
-    data: dict | None = None
-    last_error = "unknown embedding error"
-
-    for attempt in range(1, OPENAI_EMBED_MAX_RETRIES + 1):
-        req = urlrequest.Request(
-            "https://api.openai.com/v1/embeddings",
-            data=payload_bytes,
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urlrequest.urlopen(req, timeout=OPENAI_EMBED_TIMEOUT_SEC) as resp:
-                raw = resp.read().decode("utf-8")
-            data = json.loads(raw)
-            break
-        except urlerror.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="ignore").strip()
-            status = int(exc.code)
-            last_error = f"http {status}: {detail or 'no response body'}"
-
-            if status == 401:
-                raise HTTPException(
-                    status_code=401,
-                    detail="OpenAI embedding unauthorized (invalid_api_key). Check OPENAI_API_KEY for retrieval_service.",
-                ) from exc
-
-            if 400 <= status < 500 and status != 429:
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        "OpenAI embedding request rejected with non-retryable client error "
-                        f"{status}: {detail or 'no response body'}"
-                    ),
-                ) from exc
-
-            if status not in OPENAI_EMBED_RETRYABLE_STATUS_CODES or attempt >= OPENAI_EMBED_MAX_RETRIES:
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        "OpenAI embedding failed after "
-                        f"{attempt} attempt(s); last error {status}: {detail or 'no response body'}"
-                    ),
-                ) from exc
-
-            capped = min(
-                OPENAI_EMBED_BACKOFF_MAX_SEC,
-                OPENAI_EMBED_BACKOFF_BASE_SEC * (2 ** (attempt - 1)),
-            )
-            sleep_sec = random.uniform(0.0, max(0.0, capped))
-            logger.warning(
-                "openai.embed.retry attempt=%s/%s status=%s sleep_sec=%.2f reason=%s",
-                attempt,
-                OPENAI_EMBED_MAX_RETRIES,
-                status,
-                sleep_sec,
-                detail or "no response body",
-            )
-            time.sleep(sleep_sec)
-        except (urlerror.URLError, TimeoutError, socket.timeout) as exc:
-            reason = getattr(exc, "reason", exc)
-            reason_text = str(reason).strip() or exc.__class__.__name__
-            last_error = f"network: {reason_text}"
-
-            if attempt >= OPENAI_EMBED_MAX_RETRIES:
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        "OpenAI embedding unavailable after "
-                        f"{attempt} attempt(s): {reason_text}"
-                    ),
-                ) from exc
-
-            capped = min(
-                OPENAI_EMBED_BACKOFF_MAX_SEC,
-                OPENAI_EMBED_BACKOFF_BASE_SEC * (2 ** (attempt - 1)),
-            )
-            sleep_sec = random.uniform(0.0, max(0.0, capped))
-            logger.warning(
-                "openai.embed.retry attempt=%s/%s network_error=%s sleep_sec=%.2f",
-                attempt,
-                OPENAI_EMBED_MAX_RETRIES,
-                reason_text,
-                sleep_sec,
-            )
-            time.sleep(sleep_sec)
-        except json.JSONDecodeError as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=f"OpenAI embedding returned invalid JSON: {exc}",
-            ) from exc
-
-    if data is None:
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "OpenAI embedding failed after "
-                f"{OPENAI_EMBED_MAX_RETRIES} attempt(s): {last_error}"
-            ),
-        )
-
-    if not isinstance(data, dict) or "data" not in data or not data["data"]:
-        raise HTTPException(status_code=502, detail="Invalid response from OpenAI embeddings API")
-
-    embedding = data["data"][0].get("embedding", [])
-    if not isinstance(embedding, list) or not embedding:
-        raise HTTPException(status_code=502, detail="OpenAI embedding response missing embedding vector")
-    return embedding
-
-
-def _openai_chat(messages: list[dict[str, str]], model: str = "gpt-4o-mini", temperature: float = 0.1) -> str:
-    _ensure_embedding_config_ready()
-    if not OPENAI_API_KEY:
-        raise HTTPException(status_code=400, detail="OPENAI_API_KEY is required for LLM generation.")
-
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-    }
-    payload_bytes = json.dumps(payload).encode("utf-8")
-
-    req = urlrequest.Request(
-        "https://api.openai.com/v1/chat/completions",
-        data=payload_bytes,
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+    dims = int(OPENAI_EMBEDDING_DIMENSIONS) if OPENAI_EMBEDDING_DIMENSIONS else None
+    results = _shared_embed(
+        [question],
+        model=OPENAI_EMBED_MODEL,
+        api_key=OPENAI_API_KEY,
+        timeout=float(OPENAI_EMBED_TIMEOUT_SEC),
+        max_retries=OPENAI_EMBED_MAX_RETRIES,
+        backoff_base=OPENAI_EMBED_BACKOFF_BASE_SEC,
+        backoff_cap=OPENAI_EMBED_BACKOFF_MAX_SEC,
+        dimensions=dims,
     )
-    try:
-        with urlrequest.urlopen(req, timeout=OPENAI_TIMEOUT_SEC) as resp:
-            raw = resp.read().decode("utf-8")
-        data = json.loads(raw)
-        return str(data["choices"][0]["message"]["content"]).strip()
-    except Exception as exc:
-        logger.error("openai.chat_failed", extra={"error": str(exc)})
-        raise HTTPException(status_code=502, detail=f"OpenAI chat failed: {str(exc)}") from exc
+    return results[0]
 
 
 def _kg_vector_chunks(repo_id: str, embedding: list[float], top_k_chunks: int) -> list[dict[str, Any]]:
@@ -497,7 +330,7 @@ def debug_env() -> dict[str, object]:
 
 @app.post("/retrieve", response_model=RetrievalPack)
 def retrieve(payload: RetrieveRequest) -> RetrievalPack:
-    repo_id = str(payload.repo_id)
+    repo_id = payload.repo_id.strip()
     top_k = payload.top_k or TOP_K
 
     keyword_hits: list[dict] = []
@@ -802,33 +635,6 @@ def kg_query(payload: KGQueryRequest) -> KGQueryResponse:
         )
     )
 
-    # --- Answer Synthesis ---
-    answer = ""
-    if evidence or linked_entities:
-        context_parts = []
-        if linked_entities:
-            context_parts.append("Linked Entities: " + ", ".join([f"{e.name} ({e.type})" for e in linked_entities[:10]]))
-        if evidence:
-            context_parts.append("Context Snippets:\n" + "\n\n".join([f"Path: {ev.doc_path}\n{ev.text}" for ev in evidence[:5]]))
-
-        context_str = "\n\n".join(context_parts)
-        system_prompt = (
-            "You are a codebase intelligence expert. Answer the user's question based ONLY on the provided GraphRAG context. "
-            "If the context is empty or irrelevant, say you don't know based on the graph. "
-            "Be concise and technical."
-        )
-        user_prompt = f"Question: {payload.question}\n\nContext:\n{context_str}"
-
-        try:
-            answer = _openai_chat([
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ])
-            trace.append(RetrievalTrace(step="answer_synthesis", detail="Answer generated via LLM."))
-        except Exception as synth_exc:
-            logger.warning("kg.query.synth_failed", extra={"repo_id": repo_id, "error": str(synth_exc)})
-            answer = "Failed to synthesize answer from retrieved context."
-
     logger.info(
         "kg.query.result",
         extra={
@@ -848,5 +654,4 @@ def kg_query(payload: KGQueryRequest) -> KGQueryResponse:
         },
         evidence=evidence,
         retrieval_trace=trace,
-        answer=answer,
     )

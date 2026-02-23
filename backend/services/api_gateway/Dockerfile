@@ -2,10 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements.txt ./
+COPY shared /shared
+RUN pip install --no-cache-dir -e /shared
+
+COPY services/api_gateway/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app ./app
+COPY services/api_gateway/app ./app
 
 EXPOSE 8000
 

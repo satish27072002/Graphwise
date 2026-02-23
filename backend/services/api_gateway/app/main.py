@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import shutil
 import time
 import uuid
 from pathlib import Path
-from urllib import error as urlerror
-from urllib import parse as urlparse
-from urllib import request as urlrequest
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,18 +13,21 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from codegraph_shared.http_utils import get_json as _shared_get_json, post_json as _shared_post_json
+
 from .config import get_settings
 from .db import engine, get_db_session
 from .logging_config import configure_logging, request_id_context
 from .models import Base, Job
 from .queue import enqueue_kg_ingest_job, enqueue_pipeline_job
 from .schemas import (
+    GraphPayload,
     JobCreatedResponse,
     JobStatusResponse,
-    QueryRequest,
-    QueryResponse,
-    RepoStatusResponse,
     KGStatusResponse,
+    QueryRequest,
+    RepoStatusResponse,
+    UnifiedQueryResponse,
 )
 
 
@@ -98,90 +97,14 @@ async def health() -> dict[str, bool]:
     return {"ok": True}
 
 
-def _clean_upstream_detail(raw: str) -> str:
-    text = raw.strip()
-    if not text:
-        return "no upstream detail"
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return text[:500]
-
-    if isinstance(parsed, dict):
-        if "detail" in parsed:
-            return str(parsed["detail"])[:500]
-        if "message" in parsed:
-            return str(parsed["message"])[:500]
-    return text[:500]
+def _post_svc(base_url: str, path: str, payload: dict) -> dict:
+    url = f"{base_url.rstrip('/')}{path}"
+    return _shared_post_json(url, payload, float(settings.service_timeout_sec))
 
 
-def _post_json(url: str, payload: dict) -> dict:
-    req = urlrequest.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urlrequest.urlopen(req, timeout=settings.service_timeout_sec) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urlerror.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore")
-        upstream_status = int(exc.code)
-        clean = _clean_upstream_detail(detail)
-        raise HTTPException(
-            status_code=upstream_status,
-            detail=f"upstream POST {url} failed ({upstream_status}): {clean}",
-        ) from exc
-    except urlerror.URLError as exc:
-        raise HTTPException(status_code=502, detail=f"upstream POST {url} unavailable: {exc.reason}") from exc
-
-
-def _get_json(url: str, params: dict[str, str]) -> dict:
-    query = urlparse.urlencode(params)
-    full_url = f"{url}?{query}" if query else url
-    req = urlrequest.Request(full_url, method="GET")
-    try:
-        with urlrequest.urlopen(req, timeout=settings.service_timeout_sec) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urlerror.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore")
-        upstream_status = int(exc.code)
-        clean = _clean_upstream_detail(detail)
-        raise HTTPException(
-            status_code=upstream_status,
-            detail=f"upstream GET {full_url} failed ({upstream_status}): {clean}",
-        ) from exc
-    except urlerror.URLError as exc:
-        raise HTTPException(status_code=502, detail=f"upstream GET {full_url} unavailable: {exc.reason}") from exc
-
-
-def _post_json_passthrough(
-    url: str,
-    body: bytes,
-    *,
-    content_type: str,
-) -> tuple[int, object]:
-    req = urlrequest.Request(
-        url,
-        data=body,
-        headers={"Content-Type": content_type or "application/json"},
-        method="POST",
-    )
-    try:
-        with urlrequest.urlopen(req, timeout=settings.service_timeout_sec) as response:
-            raw = response.read().decode("utf-8")
-            payload: object = json.loads(raw) if raw else {}
-            return int(response.status), payload
-    except urlerror.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="ignore")
-        try:
-            payload: object = json.loads(raw) if raw else {}
-        except json.JSONDecodeError:
-            payload = {"detail": raw or f"upstream POST {url} failed with status {exc.code}"}
-        return int(exc.code), payload
-    except urlerror.URLError as exc:
-        raise HTTPException(status_code=502, detail=f"upstream POST {url} unavailable: {exc.reason}") from exc
+def _get_svc(base_url: str, path: str, params: dict[str, str]) -> dict:
+    url = f"{base_url.rstrip('/')}{path}"
+    return _shared_get_json(url, params, float(settings.service_timeout_sec))
 
 
 async def _create_pipeline_job(
@@ -314,24 +237,47 @@ async def list_jobs(
     return [JobStatusResponse.model_validate(row) for row in rows]
 
 
-@app.post("/query", response_model=QueryResponse)
-def query_repo(payload: QueryRequest) -> QueryResponse:
-    retrieval_url = f"{settings.retrieval_service_url.rstrip('/')}/retrieve"
-    llm_url = f"{settings.llm_service_url.rstrip('/')}/answer"
+@app.post("/query", response_model=UnifiedQueryResponse)
+def query_repo(payload: QueryRequest) -> UnifiedQueryResponse:
+    repo_id = str(payload.repo_id)
 
-    retrieval_pack = _post_json(
-        retrieval_url,
-        {
-            "repo_id": str(payload.repo_id),
-            "question": payload.question,
-        },
+    # Retrieve from code graph
+    retrieval_pack = _post_svc(
+        settings.retrieval_service_url,
+        "/retrieve",
+        {"repo_id": repo_id, "question": payload.question},
     )
-    llm_response = _post_json(
-        llm_url,
+
+    # Retrieve from KG graph (best-effort — don't fail if KG is empty)
+    kg_context: dict | None = None
+    try:
+        kg_result = _post_svc(
+            settings.retrieval_service_url,
+            "/kg/query",
+            {
+                "repo_id": repo_id,
+                "question": payload.question,
+                "top_k_chunks": 10,
+                "hops": 1,
+            },
+        )
+        kg_context = kg_result
+    except HTTPException as exc:
+        logger.warning(
+            "query.kg_retrieval_failed repo_id=%s detail=%s",
+            repo_id,
+            exc.detail,
+        )
+
+    # Single LLM call with combined context
+    llm_response = _post_svc(
+        settings.llm_service_url,
+        "/answer",
         {
-            "repo_id": str(payload.repo_id),
+            "repo_id": repo_id,
             "question": payload.question,
             "retrieval_pack": retrieval_pack,
+            "kg_context": kg_context,
         },
     )
 
@@ -339,34 +285,36 @@ def query_repo(payload: QueryRequest) -> QueryResponse:
     citations = [str(item) for item in citations_raw] if isinstance(citations_raw, list) else []
     warning = llm_response.get("warning")
 
-    return QueryResponse(
+    # Build typed GraphPayload from the llm_service graph dict
+    raw_graph = llm_response.get("graph", {"nodes": [], "edges": []})
+    graph = GraphPayload(
+        nodes=[
+            {"id": n.get("id", ""), "type": n.get("type", "file"), "label": n.get("label", ""), "path": n.get("path")}
+            for n in raw_graph.get("nodes", [])
+            if isinstance(n, dict) and n.get("id")
+        ],
+        edges=[
+            {"id": e.get("id", ""), "source": e.get("source", ""), "target": e.get("target", ""), "label": e.get("label", "related")}
+            for e in raw_graph.get("edges", [])
+            if isinstance(e, dict) and e.get("source") and e.get("target")
+        ],
+    )
+
+    return UnifiedQueryResponse(
         answer=str(llm_response.get("answer", "")),
         citations=citations,
+        graph=graph,
         warning=str(warning) if warning is not None else None,
-        retrieval_pack=retrieval_pack,
     )
-
-
-@app.post("/kg/query")
-async def kg_query_proxy(request: Request):
-    retrieval_url = f"{settings.retrieval_service_url.rstrip('/')}/kg/query"
-    status_code, payload = _post_json_passthrough(
-        retrieval_url,
-        await request.body(),
-        content_type=request.headers.get("content-type", "application/json"),
-    )
-    return JSONResponse(status_code=status_code, content=payload)
 
 
 @app.get("/repos/{repo_id}/status", response_model=RepoStatusResponse)
 def repo_status(repo_id: uuid.UUID) -> RepoStatusResponse:
-    graph_url = f"{settings.graph_service_url.rstrip('/')}/graph/repo/status"
-    payload = _get_json(graph_url, {"repo_id": str(repo_id)})
+    payload = _get_svc(settings.graph_service_url, "/graph/repo/status", {"repo_id": str(repo_id)})
     return RepoStatusResponse.model_validate(payload)
 
 
 @app.get("/repos/{repo_id}/kg-status", response_model=KGStatusResponse)
 def kg_status(repo_id: uuid.UUID) -> KGStatusResponse:
-    graph_url = f"{settings.graph_service_url.rstrip('/')}/kg/status"
-    payload = _get_json(graph_url, {"repo_id": str(repo_id)})
+    payload = _get_svc(settings.graph_service_url, "/kg/status", {"repo_id": str(repo_id)})
     return KGStatusResponse.model_validate(payload)

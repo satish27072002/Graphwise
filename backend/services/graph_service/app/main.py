@@ -1,22 +1,23 @@
 from __future__ import annotations
 
 import json
+
 import logging
 import os
-import random
 import re
-import socket
 import time
 import uuid
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
-from urllib import error as urlerror
-from urllib import request as urlrequest
 
 from fastapi import FastAPI, HTTPException, Response
 from neo4j import Driver, GraphDatabase
 from neo4j.exceptions import Neo4jError
+
+from codegraph_shared.http_utils import post_json as _shared_post_json
+from codegraph_shared.openai_utils import embed as _shared_embed
+from codegraph_shared.kg_normalize import normalize_kg_extract
 
 from app.api import router as graph_router
 from app.kg_api import router as kg_router
@@ -272,148 +273,18 @@ def _embedding_text(row: dict) -> str:
 
 
 def _openai_embed(inputs: list[str]) -> list[list[float]]:
-    if not inputs:
-        return []
     _ensure_embedding_config_ready()
-    if not OPENAI_API_KEY:
-        raise HTTPException(
-            status_code=400,
-            detail="OPENAI_API_KEY is required for embedding operations.",
-        )
-
-    payload: dict[str, object] = {
-        "model": OPENAI_EMBED_MODEL,
-        "input": inputs,
-    }
-    if OPENAI_EMBEDDING_DIMENSIONS and OPENAI_EMBED_MODEL.startswith("text-embedding-3"):
-        payload["dimensions"] = int(OPENAI_EMBEDDING_DIMENSIONS)
-
-    payload_bytes = json.dumps(payload).encode("utf-8")
-    data: dict | None = None
-    last_error: str = "unknown embedding error"
-    attempt = 0
-
-    while attempt < OPENAI_EMBED_MAX_RETRIES:
-        attempt += 1
-        req = urlrequest.Request(
-            "https://api.openai.com/v1/embeddings",
-            data=payload_bytes,
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urlrequest.urlopen(req, timeout=OPENAI_EMBED_TIMEOUT_SEC) as resp:
-                raw = resp.read().decode("utf-8")
-            data = json.loads(raw)
-            break
-        except urlerror.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="ignore").strip()
-            status = int(exc.code)
-            last_error = f"http {status}: {detail or 'no response body'}"
-
-            if 400 <= status < 500 and status != 429:
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        "OpenAI embedding request rejected with non-retryable client error "
-                        f"{status}: {detail or 'no response body'}"
-                    ),
-                ) from exc
-
-            if status not in OPENAI_RETRYABLE_STATUS_CODES or attempt >= OPENAI_EMBED_MAX_RETRIES:
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        "OpenAI embedding failed after "
-                        f"{attempt} attempt(s); last error {status}: {detail or 'no response body'}"
-                    ),
-                ) from exc
-
-            capped = min(
-                OPENAI_EMBED_BACKOFF_MAX_SEC,
-                OPENAI_EMBED_BACKOFF_BASE_SEC * (2 ** (attempt - 1)),
-            )
-            sleep_sec = random.uniform(0.0, max(0.0, capped))
-            logger.warning(
-                "openai.embed.retry attempt=%s/%s status=%s sleep_sec=%.2f reason=%s",
-                attempt,
-                OPENAI_EMBED_MAX_RETRIES,
-                status,
-                sleep_sec,
-                detail or "no response body",
-            )
-            time.sleep(sleep_sec)
-        except (urlerror.URLError, TimeoutError, socket.timeout) as exc:
-            reason = getattr(exc, "reason", exc)
-            reason_text = str(reason).strip() or exc.__class__.__name__
-            last_error = f"network: {reason_text}"
-
-            if attempt >= OPENAI_EMBED_MAX_RETRIES:
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        "OpenAI embedding unavailable after "
-                        f"{attempt} attempt(s): {reason_text}"
-                    ),
-                ) from exc
-
-            capped = min(
-                OPENAI_EMBED_BACKOFF_MAX_SEC,
-                OPENAI_EMBED_BACKOFF_BASE_SEC * (2 ** (attempt - 1)),
-            )
-            sleep_sec = random.uniform(0.0, max(0.0, capped))
-            logger.warning(
-                "openai.embed.retry attempt=%s/%s network_error=%s sleep_sec=%.2f",
-                attempt,
-                OPENAI_EMBED_MAX_RETRIES,
-                reason_text,
-                sleep_sec,
-            )
-            time.sleep(sleep_sec)
-        except json.JSONDecodeError as exc:
-            last_error = f"invalid json from OpenAI: {exc}"
-            if attempt >= OPENAI_EMBED_MAX_RETRIES:
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        "OpenAI embedding returned invalid JSON after "
-                        f"{attempt} attempt(s): {exc}"
-                    ),
-                ) from exc
-            capped = min(
-                OPENAI_EMBED_BACKOFF_MAX_SEC,
-                OPENAI_EMBED_BACKOFF_BASE_SEC * (2 ** (attempt - 1)),
-            )
-            sleep_sec = random.uniform(0.0, max(0.0, capped))
-            logger.warning(
-                "openai.embed.retry attempt=%s/%s parse_error=%s sleep_sec=%.2f",
-                attempt,
-                OPENAI_EMBED_MAX_RETRIES,
-                exc,
-                sleep_sec,
-            )
-            time.sleep(sleep_sec)
-
-    if data is None:
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "OpenAI embedding failed after "
-                f"{OPENAI_EMBED_MAX_RETRIES} attempt(s): {last_error}"
-            ),
-        )
-
-    if not isinstance(data, dict) or "data" not in data:
-        raise HTTPException(status_code=502, detail="Invalid response from OpenAI embeddings API")
-
-    items = sorted(data["data"], key=lambda item: item.get("index", 0))
-    embeddings = [item.get("embedding", []) for item in items]
-    if len(embeddings) != len(inputs):
-        raise HTTPException(status_code=502, detail="OpenAI embedding response size mismatch")
-    return embeddings
+    dims = int(OPENAI_EMBEDDING_DIMENSIONS) if OPENAI_EMBEDDING_DIMENSIONS else None
+    return _shared_embed(
+        inputs,
+        model=OPENAI_EMBED_MODEL,
+        api_key=OPENAI_API_KEY,
+        timeout=float(OPENAI_EMBED_TIMEOUT_SEC),
+        max_retries=OPENAI_EMBED_MAX_RETRIES,
+        backoff_base=OPENAI_EMBED_BACKOFF_BASE_SEC,
+        backoff_cap=OPENAI_EMBED_BACKOFF_MAX_SEC,
+        dimensions=dims,
+    )
 
 
 def _repo_nodes_for_embedding(session, repo_id: str) -> list[dict]:
@@ -511,81 +382,20 @@ def _chunk_text(text: str) -> list[str]:
     return chunks
 
 
-def _normalize_kg_extract_payload(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    raw_entities = payload.get("entities", [])
-    raw_relations = payload.get("relationships", [])
-    entities: list[dict[str, Any]] = []
-    relations: list[dict[str, Any]] = []
-
-    if isinstance(raw_entities, list):
-        for raw in raw_entities:
-            if not isinstance(raw, dict):
-                continue
-            name = str(raw.get("name", "")).strip()
-            if not name:
-                continue
-            entity_type = str(raw.get("type", "unknown")).strip() or "unknown"
-            entities.append({"name": name, "type": entity_type})
-
-    if isinstance(raw_relations, list):
-        for raw in raw_relations:
-            if not isinstance(raw, dict):
-                continue
-            source = str(raw.get("source", "")).strip()
-            target = str(raw.get("target", "")).strip()
-            if not source or not target:
-                continue
-            relation_type = str(raw.get("relation_type", "related_to")).strip() or "related_to"
-            evidence = str(raw.get("evidence", "")).strip()
-            confidence_raw = raw.get("confidence", 0.5)
-            try:
-                confidence = float(confidence_raw)
-            except (TypeError, ValueError):
-                confidence = 0.5
-            confidence = max(0.0, min(confidence, 1.0))
-            relations.append(
-                {
-                    "source": source,
-                    "target": target,
-                    "relation_type": relation_type,
-                    "confidence": confidence,
-                    "evidence": evidence,
-                }
-            )
-    return entities, relations
-
-
 def _llm_extract_for_chunk(*, repo_id: str, path: str, chunk_text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    endpoint = f"{LLM_SERVICE_URL.rstrip('/')}/kg/extract"
-    payload = json.dumps(
-        {
-            "repo_id": repo_id,
-            "path": path,
-            "chunk_text": chunk_text,
-        }
-    ).encode("utf-8")
-
+    endpoint = f"{LLM_SERVICE_URL.rstrip('/')}/extract/kg"
     last_error = "unknown extraction error"
     for attempt in range(1, KG_EXTRACT_RETRIES + 1):
-        req = urlrequest.Request(
-            endpoint,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
         try:
-            with urlrequest.urlopen(req, timeout=LLM_SERVICE_TIMEOUT_SEC) as response:
-                body = response.read().decode("utf-8")
-            parsed = json.loads(body)
-            if not isinstance(parsed, dict):
-                raise ValueError("response is not a json object")
-            entities, relations = _normalize_kg_extract_payload(parsed)
+            result = _shared_post_json(
+                endpoint,
+                {"repo_id": repo_id, "doc_path": path, "chunk_id": f"{repo_id}_{attempt}", "text": chunk_text},
+                float(LLM_SERVICE_TIMEOUT_SEC),
+            )
+            entities, relations = normalize_kg_extract(result)
             return entities, relations
-        except (urlerror.HTTPError, urlerror.URLError, TimeoutError, socket.timeout, json.JSONDecodeError, ValueError) as exc:
-            last_error = str(exc)
-            if isinstance(exc, urlerror.HTTPError):
-                detail = exc.read().decode("utf-8", errors="ignore")
-                last_error = f"http {exc.code}: {detail or 'no response body'}"
+        except HTTPException as exc:
+            last_error = str(exc.detail)
             if attempt >= KG_EXTRACT_RETRIES:
                 break
             time.sleep(min(1.0, 0.25 * attempt))

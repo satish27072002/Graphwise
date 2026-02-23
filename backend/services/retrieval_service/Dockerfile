@@ -2,10 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements.txt ./
+COPY shared /shared
+RUN pip install --no-cache-dir -e /shared
+
+COPY services/retrieval_service/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app ./app
+COPY services/retrieval_service/app ./app
 
 EXPOSE 8003
 

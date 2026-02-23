@@ -56,7 +56,7 @@ MAX_TOTAL_UNZIPPED_MB: Final[int] = int(os.getenv("MAX_TOTAL_UNZIPPED_MB", "500"
 TRANSIENT_EMBED_HTTP_STATUSES: Final[set[int]] = {502, 503, 504}
 KG_ALLOWED_EXTENSIONS: Final[set[str]] = {
     ext.strip().lower()
-    for ext in os.getenv("KG_ALLOWED_EXTENSIONS", ".py").split(",")
+    for ext in os.getenv("KG_ALLOWED_EXTENSIONS", ".py,.js,.jsx,.ts,.tsx,.java,.go,.rs").split(",")
     if ext.strip()
 }
 KG_MAX_FILE_BYTES: Final[int] = int(os.getenv("KG_MAX_FILE_BYTES", str(256 * 1024)))

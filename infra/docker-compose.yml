@@ -44,7 +44,8 @@ services:
 
   api_gateway:
     build:
-      context: ../backend/services/api_gateway
+      context: ../backend
+      dockerfile: services/api_gateway/Dockerfile
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     env_file:
       - ../.env
@@ -102,7 +103,8 @@ services:
 
   graph_service:
     build:
-      context: ../backend/services/graph_service
+      context: ../backend
+      dockerfile: services/graph_service/Dockerfile
     command: uvicorn app.main:app --host 0.0.0.0 --port 8002
     env_file:
       - ../.env
@@ -136,7 +138,8 @@ services:
 
   retrieval_service:
     build:
-      context: ../backend/services/retrieval_service
+      context: ../backend
+      dockerfile: services/retrieval_service/Dockerfile
     command: uvicorn app.main:app --host 0.0.0.0 --port 8003
     env_file:
       - ../.env
@@ -168,7 +171,8 @@ services:
 
   llm_service:
     build:
-      context: ../backend/services/llm_service
+      context: ../backend
+      dockerfile: services/llm_service/Dockerfile
     command: uvicorn app.main:app --host 0.0.0.0 --port 8004
     env_file:
       - ../.env
@@ -188,7 +192,8 @@ services:
 
   workers:
     build:
-      context: ../backend/services/workers
+      context: ../backend
+      dockerfile: services/workers/Dockerfile
     command: celery -A celery_app worker -Q pipeline --loglevel=INFO
     env_file:
       - ../.env

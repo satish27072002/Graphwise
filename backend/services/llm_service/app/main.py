@@ -4,44 +4,38 @@ import json
 import logging
 import os
 import re
-import uuid
 from typing import Any
-from urllib import error as urlerror
-from urllib import request as urlrequest
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+
+from codegraph_shared.openai_utils import chat as _shared_chat
+from codegraph_shared.kg_normalize import normalize_kg_extract
 
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
 OPENAI_TIMEOUT_SEC = int(os.getenv("OPENAI_TIMEOUT_SEC", "30"))
-NEO4J_URL = os.getenv("NEO4J_URL") or os.getenv("NEO4J_URI") or "bolt://neo4j:7687"
 MAX_CONTEXT_SNIPPETS = int(os.getenv("MAX_CONTEXT_SNIPPETS", "8"))
 MAX_SNIPPET_CHARS = int(os.getenv("MAX_LLM_SNIPPET_CHARS", "1200"))
 MAX_GRAPH_EDGES_FOR_PROMPT = int(os.getenv("MAX_GRAPH_EDGES_FOR_PROMPT", "40"))
-KG_RELATION_TYPES = {"defines", "uses", "depends_on", "calls", "inherits", "part_of", "related"}
 
 app = FastAPI(title="llm_service")
 logger = logging.getLogger("llm_service")
 
 
 class AnswerRequest(BaseModel):
-    repo_id: uuid.UUID
+    repo_id: str = Field(min_length=1)
     question: str = Field(min_length=1)
     retrieval_pack: dict[str, Any]
+    kg_context: dict[str, Any] | None = None
 
 
 class AnswerResponse(BaseModel):
     answer: str
     citations: list[str]
+    graph: dict[str, Any]
     warning: str | None = None
-
-
-class KGExtractRequest(BaseModel):
-    repo_id: str | None = None
-    path: str = ""
-    chunk_text: str = Field(min_length=1)
 
 
 class KGChunkExtractRequest(BaseModel):
@@ -93,14 +87,17 @@ def _fallback_answer(question: str, retrieval_pack: dict[str, Any]) -> AnswerRes
                 "Run ingest/indexing and retry the query."
             ),
             citations=[],
+            graph={"nodes": [], "edges": []},
             warning="OPENAI_API_KEY missing; returned deterministic fallback answer.",
         )
 
     answer = _deterministic_summary_answer(question, retrieval_pack, snippets)
     citations = [snippet["id"] for snippet in snippets[:5]]
+    graph = _build_graph_payload(retrieval_pack, kg_context=None)
     return AnswerResponse(
         answer=answer,
         citations=citations,
+        graph=graph,
         warning="OPENAI_API_KEY missing; returned deterministic fallback answer.",
     )
 
@@ -179,38 +176,162 @@ def _normalized_edges(retrieval_pack: dict[str, Any]) -> list[dict[str, str]]:
     return normalized
 
 
-def _graph_context_summary(retrieval_pack: dict[str, Any]) -> str:
+def _graph_context_summary(retrieval_pack: dict[str, Any], kg_context: dict[str, Any] | None) -> str:
     nodes = _normalized_nodes(retrieval_pack)
     edges = _normalized_edges(retrieval_pack)
-    if not nodes and not edges:
-        return "No graph neighborhood data available."
 
-    node_by_id = {node["id"]: node for node in nodes}
-    type_counts: dict[str, int] = {}
-    for node in nodes:
-        node_type = node["type"] or "unknown"
-        type_counts[node_type] = type_counts.get(node_type, 0) + 1
+    lines: list[str] = []
 
-    top_types = ", ".join(
-        f"{node_type}:{count}"
-        for node_type, count in sorted(type_counts.items(), key=lambda item: item[1], reverse=True)[:4]
-    ) or "n/a"
+    if nodes or edges:
+        node_by_id = {node["id"]: node for node in nodes}
+        type_counts: dict[str, int] = {}
+        for node in nodes:
+            node_type = node["type"] or "unknown"
+            type_counts[node_type] = type_counts.get(node_type, 0) + 1
 
-    edge_lines: list[str] = []
-    for edge in edges[:MAX_GRAPH_EDGES_FOR_PROMPT]:
-        source = node_by_id.get(edge["source"], {"name": edge["source"]})
-        target = node_by_id.get(edge["target"], {"name": edge["target"]})
-        edge_lines.append(f"{source['name']} -[{edge['type']}]-> {target['name']}")
+        top_types = ", ".join(
+            f"{node_type}:{count}"
+            for node_type, count in sorted(type_counts.items(), key=lambda item: item[1], reverse=True)[:4]
+        ) or "n/a"
 
-    lines = [
-        f"Graph nodes: {len(nodes)}",
-        f"Graph edges: {len(edges)}",
-        f"Node types: {top_types}",
-    ]
-    if edge_lines:
-        lines.append("Key relationships:")
-        lines.extend(edge_lines)
-    return "\n".join(lines)
+        edge_lines: list[str] = []
+        for edge in edges[:MAX_GRAPH_EDGES_FOR_PROMPT]:
+            source = node_by_id.get(edge["source"], {"name": edge["source"]})
+            target = node_by_id.get(edge["target"], {"name": edge["target"]})
+            edge_lines.append(f"{source['name']} -[{edge['type']}]-> {target['name']}")
+
+        lines += [
+            f"Code graph nodes: {len(nodes)}",
+            f"Code graph edges: {len(edges)}",
+            f"Node types: {top_types}",
+        ]
+        if edge_lines:
+            lines.append("Key code relationships:")
+            lines.extend(edge_lines)
+
+    if kg_context:
+        linked = kg_context.get("linked_entities", [])
+        evidence = kg_context.get("evidence", [])
+        subgraph = kg_context.get("subgraph", {})
+        kg_edges = subgraph.get("edges", []) if isinstance(subgraph, dict) else []
+
+        if linked:
+            entity_str = ", ".join(
+                f"{e.get('name', '')} ({e.get('type', '')})" for e in linked[:10]
+            )
+            lines.append(f"Semantic entities: {entity_str}")
+
+        if kg_edges:
+            lines.append("Semantic relationships:")
+            for edge in kg_edges[:MAX_GRAPH_EDGES_FOR_PROMPT]:
+                if isinstance(edge, dict):
+                    lines.append(
+                        f"{edge.get('source', '?')} -[{edge.get('type', 'related')}]-> {edge.get('target', '?')}"
+                    )
+
+        if evidence:
+            lines.append("Supporting evidence:")
+            for ev in evidence[:5]:
+                if isinstance(ev, dict):
+                    lines.append(f"[{ev.get('doc_path', '')}] {str(ev.get('text', ''))[:300]}")
+
+    return "\n".join(lines) if lines else "No graph context available."
+
+
+def _build_graph_payload(
+    retrieval_pack: dict[str, Any],
+    kg_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build a unified graph payload merging code graph nodes/edges with KG entities/relations."""
+    nodes_by_id: dict[str, dict[str, Any]] = {}
+    edges: list[dict[str, Any]] = []
+
+    # Code graph nodes
+    for raw in retrieval_pack.get("nodes", []):
+        if not isinstance(raw, dict):
+            continue
+        node_id = str(raw.get("id", "")).strip()
+        if not node_id:
+            continue
+        nodes_by_id[node_id] = {
+            "id": node_id,
+            "type": str(raw.get("type", "file")).strip() or "file",
+            "label": str(raw.get("name", node_id)).strip(),
+            "path": str(raw.get("path", "")).strip() or None,
+        }
+
+    # Code graph edges
+    edge_counter = 0
+    for raw in retrieval_pack.get("edges", []):
+        if not isinstance(raw, dict):
+            continue
+        source = str(raw.get("source", "")).strip()
+        target = str(raw.get("target", "")).strip()
+        if not source or not target:
+            continue
+        edges.append({
+            "id": f"ce_{edge_counter}",
+            "source": source,
+            "target": target,
+            "label": str(raw.get("type", "related")).strip().lower() or "related",
+        })
+        edge_counter += 1
+
+    if kg_context:
+        linked_entities = kg_context.get("linked_entities", [])
+        subgraph = kg_context.get("subgraph", {})
+        kg_edges = subgraph.get("edges", []) if isinstance(subgraph, dict) else []
+
+        # KG entity nodes — add as "concept" type if no matching code node
+        name_to_id: dict[str, str] = {}
+        for node in nodes_by_id.values():
+            name_to_id[node["label"].lower()] = node["id"]
+
+        for entity in linked_entities:
+            if not isinstance(entity, dict):
+                continue
+            name = str(entity.get("name", "")).strip()
+            if not name:
+                continue
+            existing_id = name_to_id.get(name.lower())
+            if existing_id:
+                # Merge: mark existing code node as also being a semantic entity
+                name_to_id[name.lower()] = existing_id
+            else:
+                concept_id = f"kg_{name.lower().replace(' ', '_')}"
+                if concept_id not in nodes_by_id:
+                    nodes_by_id[concept_id] = {
+                        "id": concept_id,
+                        "type": "concept",
+                        "label": name,
+                        "path": None,
+                    }
+                name_to_id[name.lower()] = concept_id
+
+        # KG relation edges
+        kg_edge_counter = 0
+        for edge in kg_edges:
+            if not isinstance(edge, dict):
+                continue
+            source_name = str(edge.get("source", "")).strip()
+            target_name = str(edge.get("target", "")).strip()
+            if not source_name or not target_name:
+                continue
+            source_id = name_to_id.get(source_name.lower())
+            target_id = name_to_id.get(target_name.lower())
+            if source_id and target_id:
+                edges.append({
+                    "id": f"ke_{kg_edge_counter}",
+                    "source": source_id,
+                    "target": target_id,
+                    "label": str(edge.get("type", "related")).strip().lower() or "related",
+                })
+                kg_edge_counter += 1
+
+    return {
+        "nodes": list(nodes_by_id.values()),
+        "edges": edges,
+    }
 
 
 def _deterministic_summary_answer(
@@ -269,71 +390,9 @@ def _looks_low_confidence(answer: str) -> bool:
     return any(marker in text for marker in weak_markers)
 
 
-def _normalize_kg_extract_payload(payload: dict[str, Any]) -> KGExtractResponse:
-    raw_entities = payload.get("entities", [])
-    raw_relationships = payload.get("relationships", [])
-    entities: list[dict[str, Any]] = []
-    relationships: list[dict[str, Any]] = []
-
-    if isinstance(raw_entities, list):
-        for raw in raw_entities:
-            if not isinstance(raw, dict):
-                continue
-            name = str(raw.get("name", "")).strip()
-            if not name:
-                continue
-            entity_type = str(raw.get("type", "unknown")).strip() or "unknown"
-            entities.append({"name": name, "type": entity_type})
-
-    if isinstance(raw_relationships, list):
-        for raw in raw_relationships:
-            if not isinstance(raw, dict):
-                continue
-            source = str(raw.get("source", "")).strip()
-            target = str(raw.get("target", "")).strip()
-            if not source or not target:
-                continue
-            relation_type = str(raw.get("relation_type", "related")).strip().lower() or "related"
-            if relation_type not in KG_RELATION_TYPES:
-                relation_type = "related"
-            evidence = str(raw.get("evidence", "")).strip()
-            confidence_raw = raw.get("confidence", 0.5)
-            try:
-                confidence = float(confidence_raw)
-            except (TypeError, ValueError):
-                confidence = 0.5
-            confidence = max(0.0, min(confidence, 1.0))
-            relationships.append(
-                {
-                    "source": source,
-                    "target": target,
-                    "relation_type": relation_type,
-                    "confidence": confidence,
-                    "evidence": evidence,
-                }
-            )
-
-    return KGExtractResponse(entities=entities, relationships=relationships)
-
-
-def _parse_json_object(content: str) -> dict[str, Any]:
-    try:
-        parsed = json.loads(content)
-        if isinstance(parsed, dict):
-            return parsed
-    except json.JSONDecodeError:
-        pass
-
-    match = re.search(r"\{.*\}", content, flags=re.DOTALL)
-    if not match:
-        raise ValueError("no json object found in model content")
-    parsed = json.loads(match.group(0))
-    if not isinstance(parsed, dict):
-        raise ValueError("parsed content is not a json object")
-    return parsed
-
-
-def _build_kg_extract_messages(payload: KGExtractRequest, *, strict_retry: bool) -> list[dict[str, str]]:
+def _build_kg_extract_messages(
+    repo_id: str, doc_path: str, chunk_text: str, *, strict_retry: bool
+) -> list[dict[str, str]]:
     relation_types = "defines, uses, depends_on, calls, inherits, part_of, related"
     base_instructions = (
         "Extract repository-meaningful entities and relationships from this chunk. "
@@ -355,9 +414,9 @@ def _build_kg_extract_messages(payload: KGExtractRequest, *, strict_retry: bool)
         )
     user_prompt = (
         f"{base_instructions}{strict_suffix}\n\n"
-        f"repo_id: {payload.repo_id or ''}\n"
-        f"path: {payload.path}\n"
-        f"chunk:\n{payload.chunk_text}"
+        f"repo_id: {repo_id}\n"
+        f"path: {doc_path}\n"
+        f"chunk:\n{chunk_text}"
     )
     return [
         {
@@ -368,32 +427,21 @@ def _build_kg_extract_messages(payload: KGExtractRequest, *, strict_retry: bool)
     ]
 
 
-def _openai_chat_completion(messages: list[dict[str, str]]) -> dict[str, Any]:
-    request_payload = {
-        "model": OPENAI_CHAT_MODEL,
-        "messages": messages,
-        "temperature": 0.0,
-        "response_format": {"type": "json_object"},
-    }
-    req = urlrequest.Request(
-        "https://api.openai.com/v1/chat/completions",
-        data=json.dumps(request_payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+def _parse_json_object(content: str) -> dict[str, Any]:
     try:
-        with urlrequest.urlopen(req, timeout=OPENAI_TIMEOUT_SEC) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urlerror.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore")
-        raise HTTPException(status_code=502, detail=f"LLM extraction failed ({exc.code}): {detail}") from exc
-    except urlerror.URLError as exc:
-        raise HTTPException(status_code=502, detail=f"LLM extraction unavailable: {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise HTTPException(status_code=502, detail="LLM extraction timed out") from exc
+        parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"\{.*\}", content, flags=re.DOTALL)
+    if not match:
+        raise ValueError("no json object found in model content")
+    parsed = json.loads(match.group(0))
+    if not isinstance(parsed, dict):
+        raise ValueError("parsed content is not a json object")
+    return parsed
 
 
 def _heuristic_kg_extract(chunk_text: str) -> KGExtractResponse:
@@ -431,14 +479,22 @@ def _heuristic_kg_extract(chunk_text: str) -> KGExtractResponse:
     return KGExtractResponse(entities=entity_list, relationships=relationships[:12])
 
 
-def _openai_kg_extract(payload: KGExtractRequest) -> KGExtractResponse:
+def _openai_kg_extract(repo_id: str, doc_path: str, chunk_text: str) -> KGExtractResponse:
     parse_error: Exception | None = None
     for strict_retry in (False, True):
-        data = _openai_chat_completion(_build_kg_extract_messages(payload, strict_retry=strict_retry))
+        messages = _build_kg_extract_messages(repo_id, doc_path, chunk_text, strict_retry=strict_retry)
         try:
-            content = data["choices"][0]["message"]["content"]
-            parsed = _parse_json_object(str(content))
-            return _normalize_kg_extract_payload(parsed)
+            content = _shared_chat(
+                messages,
+                model=OPENAI_CHAT_MODEL,
+                api_key=OPENAI_API_KEY,
+                timeout=float(OPENAI_TIMEOUT_SEC),
+                temperature=0.0,
+                response_format={"type": "json_object"},
+            )
+            parsed = _parse_json_object(content)
+            entities, relationships = normalize_kg_extract(parsed)
+            return KGExtractResponse(entities=entities, relationships=relationships)
         except (KeyError, ValueError, json.JSONDecodeError) as exc:
             parse_error = exc
             if strict_retry:
@@ -449,67 +505,52 @@ def _openai_kg_extract(payload: KGExtractRequest) -> KGExtractResponse:
     raise HTTPException(status_code=502, detail=f"LLM extraction JSON parse failed after retry: {parse_error}")
 
 
-def _openai_answer(question: str, retrieval_pack: dict[str, Any]) -> AnswerResponse:
+def _openai_answer(
+    question: str,
+    retrieval_pack: dict[str, Any],
+    kg_context: dict[str, Any] | None,
+) -> AnswerResponse:
     snippets = _sorted_snippets(retrieval_pack)[:MAX_CONTEXT_SNIPPETS]
     context = _build_context(snippets)
-    graph_context = _graph_context_summary(retrieval_pack)
+    graph_context = _graph_context_summary(retrieval_pack, kg_context)
     allowed_ids = {snippet["id"] for snippet in snippets}
 
     prompt = (
-        "You are answering repository questions using retrieved code and graph context. "
-        "Return strict JSON with keys: answer (string) and citations (array of snippet ids). "
+        "You are answering repository questions using retrieved code structure and semantic graph context. "
+        "Return strict JSON with keys: answer (string) and citations (array of snippet ids from the code context). "
         "Only cite ids from the provided context. "
         "When context exists, give a best-effort explanation instead of saying there is no context.\n\n"
         f"Question:\n{question}\n\n"
-        f"Context snippets:\n{context}\n"
-        f"\nGraph context:\n{graph_context}\n"
-    )
-
-    payload = {
-        "model": OPENAI_CHAT_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Be concise, factual, and cite provided snippet ids. "
-                    "Answer with practical explanation: repository purpose, key components, and how components connect. "
-                    "Never claim there is no context when snippets or graph relationships are present."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"},
-    }
-
-    req = urlrequest.Request(
-        "https://api.openai.com/v1/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+        f"Code Structure Context:\n{context}\n"
+        f"\nGraph and Semantic Context:\n{graph_context}\n"
     )
 
     try:
-        with urlrequest.urlopen(req, timeout=OPENAI_TIMEOUT_SEC) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urlerror.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore")
-        raise HTTPException(status_code=502, detail=f"OpenAI LLM call failed ({exc.code}): {detail}") from exc
-    except urlerror.URLError as exc:
-        raise HTTPException(status_code=502, detail=f"OpenAI LLM unavailable: {exc.reason}") from exc
-
-    try:
-        content = data["choices"][0]["message"]["content"]
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail="Invalid OpenAI LLM response payload") from exc
+        content = _shared_chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Be concise, factual, and cite provided snippet ids. "
+                        "Answer with practical explanation: repository purpose, key components, and how components connect. "
+                        "Never claim there is no context when snippets or graph relationships are present."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            model=OPENAI_CHAT_MODEL,
+            api_key=OPENAI_API_KEY,
+            timeout=float(OPENAI_TIMEOUT_SEC),
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+    except HTTPException as exc:
+        raise exc
 
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError:
-        parsed = {"answer": str(content), "citations": _extract_ids(str(content), allowed_ids)}
+        parsed = {"answer": content, "citations": _extract_ids(content, allowed_ids)}
 
     answer = str(parsed.get("answer", "")).strip() or "No answer generated."
     citations_raw = parsed.get("citations", [])
@@ -530,7 +571,9 @@ def _openai_answer(question: str, retrieval_pack: dict[str, Any]) -> AnswerRespo
         answer = f"{deterministic}\n\nModel response note:\n{answer}"
         warning = "LLM returned low-confidence wording; appended deterministic retrieval summary."
 
-    return AnswerResponse(answer=answer, citations=citations, warning=warning)
+    graph = _build_graph_payload(retrieval_pack, kg_context)
+
+    return AnswerResponse(answer=answer, citations=citations, graph=graph, warning=warning)
 
 
 @app.get("/health")
@@ -542,31 +585,15 @@ async def health() -> dict[str, bool]:
 def answer(payload: AnswerRequest) -> AnswerResponse:
     if not OPENAI_API_KEY:
         return _fallback_answer(payload.question, payload.retrieval_pack)
-    return _openai_answer(payload.question, payload.retrieval_pack)
-
-
-@app.post("/kg/extract", response_model=KGExtractResponse)
-def kg_extract(payload: KGExtractRequest) -> KGExtractResponse:
-    if not OPENAI_API_KEY:
-        return _heuristic_kg_extract(payload.chunk_text)
-    try:
-        return _openai_kg_extract(payload)
-    except HTTPException as exc:
-        logger.warning("kg.extract.openai_failed detail=%s; using heuristic fallback", exc.detail)
-        return _heuristic_kg_extract(payload.chunk_text)
+    return _openai_answer(payload.question, payload.retrieval_pack, payload.kg_context)
 
 
 @app.post("/extract/kg", response_model=KGExtractResponse)
 def extract_kg(payload: KGChunkExtractRequest) -> KGExtractResponse:
-    normalized_payload = KGExtractRequest(
-        repo_id=payload.repo_id,
-        path=payload.doc_path,
-        chunk_text=payload.text,
-    )
     if not OPENAI_API_KEY:
-        return _heuristic_kg_extract(normalized_payload.chunk_text)
+        return _heuristic_kg_extract(payload.text)
     try:
-        return _openai_kg_extract(normalized_payload)
+        return _openai_kg_extract(payload.repo_id, payload.doc_path, payload.text)
     except HTTPException as exc:
         logger.warning(
             "extract.kg.openai_failed repo_id=%s doc_path=%s chunk_id=%s detail=%s; using heuristic fallback",
@@ -575,4 +602,4 @@ def extract_kg(payload: KGChunkExtractRequest) -> KGExtractResponse:
             payload.chunk_id,
             exc.detail,
         )
-        return _heuristic_kg_extract(normalized_payload.chunk_text)
+        return _heuristic_kg_extract(payload.text)

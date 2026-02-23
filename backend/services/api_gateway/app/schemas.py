@@ -32,11 +32,30 @@ class QueryRequest(BaseModel):
     question: str
 
 
-class QueryResponse(BaseModel):
+class GraphNode(BaseModel):
+    id: str
+    type: str
+    label: str
+    path: str | None = None
+
+
+class GraphEdge(BaseModel):
+    id: str
+    source: str
+    target: str
+    label: str
+
+
+class GraphPayload(BaseModel):
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+
+
+class UnifiedQueryResponse(BaseModel):
     answer: str
     citations: list[str]
+    graph: GraphPayload
     warning: str | None = None
-    retrieval_pack: dict[str, Any]
 
 
 class RepoStatusResponse(BaseModel):

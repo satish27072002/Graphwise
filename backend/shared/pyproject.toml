@@ -1,0 +1,9 @@
+[project]
+name = "codegraph-shared"
+version = "0.1.0"
+description = "Shared utilities for codegraph-navigator backend services"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["codegraph_shared*"]
