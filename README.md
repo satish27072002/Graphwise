@@ -1,6 +1,7 @@
 # Graphwise
 
 Graphwise is a web app that turns a codebase into a searchable, queryable knowledge graph. You can upload a repository (as a ZIP), let Graphwise ingest and structure the code, and then ask questions to explore architecture, components, relationships, and relevant context across the project.
+(NOTE: The VM could be switched off due to resource constraints, if you are hiring officer or user please mail me i can switch it ON)
 
 ## What Graphwise does
 
