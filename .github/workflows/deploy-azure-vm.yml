@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AZURE_APP_DIR: /opt/graphwise
+      AUTO_INSTALL_DOCKER: "false"
     steps:
       - uses: actions/checkout@v4
 
@@ -55,6 +56,53 @@ jobs:
             --exclude 'data' \
             -e "ssh -o StrictHostKeyChecking=no" \
             ./ "${VM_USER}@${VM_HOST}:${AZURE_APP_DIR}"
+
+      - name: "Preflight: Install Docker on VM"
+        if: steps.precheck.outputs.ready == 'true' && env.AUTO_INSTALL_DOCKER == 'true'
+        env:
+          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+          VM_USER: ${{ secrets.AZURE_VM_USER }}
+        run: |
+          ssh -o StrictHostKeyChecking=no "${VM_USER}@${VM_HOST}" <<'EOFSSH'
+            set -euo pipefail
+            echo "Auto-installing Docker..."
+            sudo apt-get update -qq
+            sudo apt-get install -y docker.io docker-compose-plugin
+            sudo usermod -aG docker "$USER"
+            echo "Docker installed successfully."
+            echo "WARNING: Group change applied. Log out of the VM and back in, then re-run this workflow."
+          EOFSSH
+
+      - name: "Preflight: Verify Docker on VM"
+        if: steps.precheck.outputs.ready == 'true'
+        env:
+          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+          VM_USER: ${{ secrets.AZURE_VM_USER }}
+        run: |
+          ssh -o StrictHostKeyChecking=no "${VM_USER}@${VM_HOST}" <<'EOFSSH'
+            set -euo pipefail
+            # Ensure deploy directory exists (safe on first deployment)
+            sudo mkdir -p /opt/graphwise
+            sudo chown "$USER":"$USER" /opt/graphwise
+            # Verify docker
+            if ! command -v docker &>/dev/null; then
+              echo "ERROR: docker not found on VM."
+              echo "To fix, SSH into the VM and run:"
+              echo "  sudo apt update && sudo apt install -y docker.io docker-compose-plugin"
+              echo "  sudo usermod -aG docker \$USER"
+              echo "  # Log out and back in, then re-run this workflow."
+              echo "Or set AUTO_INSTALL_DOCKER=true in the workflow env to install automatically."
+              exit 1
+            fi
+            if ! docker compose version &>/dev/null; then
+              echo "ERROR: 'docker compose' plugin not found on VM."
+              echo "To fix: sudo apt install -y docker-compose-plugin"
+              exit 1
+            fi
+            docker --version
+            docker compose version
+            echo "Docker preflight passed."
+          EOFSSH
 
       - name: Deploy containers
         if: steps.precheck.outputs.ready == 'true'
