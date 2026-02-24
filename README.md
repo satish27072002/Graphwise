@@ -72,5 +72,5 @@ Minimum required configuration includes:
 Example:
 ```env
 OPENAI_API_KEY=REPLACE_ME
-CORS_ORIGINS=https://graphwise-satish.norwayeast.cloudapp.azure.com,http://graphwise-satish.norwayeast.cloudapp.azure.com
+CORS_ORIGINS=
 VITE_API_BASE=/api
