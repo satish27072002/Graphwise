@@ -84,6 +84,9 @@ jobs:
             # Ensure deploy directory exists (safe on first deployment)
             sudo mkdir -p /opt/graphwise
             sudo chown "$USER":"$USER" /opt/graphwise
+            # Ensure data directory exists with open permissions so non-root container users can write
+            sudo mkdir -p /opt/graphwise/data
+            sudo chmod 777 /opt/graphwise/data
             # Verify docker
             if ! command -v docker &>/dev/null; then
               echo "ERROR: docker not found on VM."

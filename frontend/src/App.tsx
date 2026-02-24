@@ -113,10 +113,10 @@ function Shell({ children }: { children: ReactNode }) {
     <div className="app-bg">
       <div className="app-grid" />
       <header className="topbar">
-        <div className="topbar-brand">
+        <Link to="/dashboard" className="topbar-brand">
           <LogoMark />
           <span className="topbar-brand-name">Graphwise</span>
-        </div>
+        </Link>
         <nav>
           <Link className={location.pathname === "/dashboard" ? "active" : ""} to="/dashboard">
             Dashboard

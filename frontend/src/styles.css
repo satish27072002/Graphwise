@@ -148,6 +148,8 @@ code, pre, kbd, .mono {
   display: flex;
   align-items: center;
   gap: 12px;
+  text-decoration: none;
+  cursor: pointer;
 }
 
 /* Bigger B&W logo */
