@@ -587,6 +587,7 @@ function StageEmpty({
   const zipInputRef = useRef<HTMLInputElement | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [sizeError, setSizeError] = useState<string | null>(null);
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
@@ -594,6 +595,11 @@ function StageEmpty({
       setIsDragging(false);
       const file = e.dataTransfer.files[0];
       if (file && (file.name.endsWith(".zip") || file.type === "application/zip")) {
+        if (file.size > 50 * 1024 * 1024) {
+          setSizeError("File is too large. Maximum size is 50 MB.");
+          return;
+        }
+        setSizeError(null);
         setSelectedFile(file);
         onFileSelected(file);
       }
@@ -604,6 +610,12 @@ function StageEmpty({
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] ?? null;
     if (file) {
+      if (file.size > 50 * 1024 * 1024) {
+        setSizeError("File is too large. Maximum size is 50 MB.");
+        setSelectedFile(null);
+        return;
+      }
+      setSizeError(null);
       setSelectedFile(file);
       onFileSelected(file);
     }
@@ -656,7 +668,7 @@ function StageEmpty({
           {selectedFile ? selectedFile.name : "Drop your ZIP here"}
         </p>
         <p className="dropzone-hint">
-          {selectedFile ? `${(selectedFile.size / 1024 / 1024).toFixed(1)} MB — ready to upload` : "or click to browse files · .zip format"}
+          {selectedFile ? `${(selectedFile.size / 1024 / 1024).toFixed(1)} MB — ready to upload` : "or click to browse files · ZIP · max 50 MB"}
         </p>
 
         {selectedFile && (
@@ -702,7 +714,7 @@ function StageEmpty({
         </motion.div>
       )}
 
-      {uploadError && <p className="error" style={{ marginTop: 12, fontSize: 13 }}>{uploadError}</p>}
+      {(sizeError || uploadError) && <p className="error" style={{ marginTop: 12, fontSize: 13 }}>{sizeError || uploadError}</p>}
 
       {/* Resume session */}
       {existingRepoId && !selectedFile && (
@@ -973,9 +985,9 @@ function Dashboard() {
   const [repoId, setRepoId] = useLocalStorageState("gw.repo_id", "");
   const [jobId, setJobId] = useLocalStorageState("gw.job_id", "");
   const [repoName, setRepoName] = useLocalStorageState("gw.repo_name", "");
-  const [question, setQuestion] = useLocalStorageState("gw.question", "What does this repository do?");
-  const [queryResult, setQueryResult] = useState<UnifiedQueryResult | null>(null);
-  const [queryError, setQueryError] = useState<string | null>(null);
+  const [question, setQuestion] = useState("");
+  const [queryResult, setQueryResult] = useLocalStorageState<UnifiedQueryResult | null>("gw.query_result", null);
+  const [queryError, setQueryError] = useLocalStorageState<string | null>("gw.query_error", null);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
 
   // Queries
@@ -1041,10 +1053,22 @@ function Dashboard() {
     return "ready";
   }, [repoId, jobId, jobStatus]);
 
+  // Clear stale session when a job fails so the user can't query un-indexed data
+  useEffect(() => {
+    if (jobStatus === "failed") {
+      setRepoId("");
+      setJobId("");
+      setRepoName("");
+      setQueryResult(null);
+      setQueryError(null);
+    }
+  }, [jobStatus]);
+
   const handleNewRepo = () => {
     setRepoId("");
     setJobId("");
     setRepoName("");
+    setQuestion("");
     setQueryResult(null);
     setQueryError(null);
     setPendingFile(null);
