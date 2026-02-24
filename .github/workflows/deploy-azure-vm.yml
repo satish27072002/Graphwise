@@ -64,7 +64,7 @@ jobs:
         run: |
           ssh -o StrictHostKeyChecking=no "${VM_USER}@${VM_HOST}" <<'EOFSSH'
             set -euo pipefail
-            cd "${AZURE_APP_DIR}"
+            cd /opt/graphwise
             docker compose --env-file .env -f infra/docker-compose.yml pull || true
             docker compose --env-file .env -f infra/docker-compose.yml up -d --build --remove-orphans
             docker compose --env-file .env -f infra/docker-compose.yml ps
